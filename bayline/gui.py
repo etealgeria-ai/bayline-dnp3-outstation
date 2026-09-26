@@ -270,12 +270,8 @@ def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
         else:
             text = "Alarm" if value >= 0.5 else "Normal"
     else:
-        if units == "Hz":
-            number = f"{value:.3f}"
-        elif units == "kV":
-            number = f"{value:.2f}"
-        elif units in ("VDC", "°C"):
-            number = f"{value:.1f}"
+        if kind in ("ai", "ao"):
+            number = f"{value:,.2f}"
         else:
             number = f"{round(value):,}"
         text = f"{number} {units}".strip()
