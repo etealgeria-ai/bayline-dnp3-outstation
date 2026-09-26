@@ -101,7 +101,9 @@ def run_gui(host) -> None:
 
     security_actions = tk.Frame(security_tab, bg=BG)
     security_actions.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-    tk.Button(security_actions, text="SAv5 on/off", command=lambda: host.set_flag("sav5", not host.snapshot()["sav"]["enabled"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    tk.Button(security_actions, text="Use SAv2", command=lambda: host.set_auth_version(2), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    tk.Button(security_actions, text="Use SAv5", command=lambda: host.set_auth_version(5), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    tk.Button(security_actions, text="SAv on/off", command=lambda: host.set_flag("sav5", not host.snapshot()["sav"]["enabled"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
     tk.Button(security_actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
     tk.Button(security_actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left")
 
@@ -113,7 +115,7 @@ def run_gui(host) -> None:
         subtitle.set(f"{snap['name']} · address {snap['outstation']} · master {snap['master']} · port {snap['port']}")
         power.configure(text="Stop outstation" if snap["running"] else "Start outstation", bg=ALARM if snap["running"] else AMBER, fg="#1a100e")
         _lamp(lamp_widgets["TCP"], lamp_vars["TCP"], f"TCP {snap['clients']}" if snap["clients"] else f"TCP {snap['port']}", snap["running"] and not snap["error"], bool(snap["error"]))
-        _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], "SAv5" if sav["status"] == KEY_OK else "SAv5 fail" if sav["status"] == KEY_AUTH_FAIL else "SAv5 init", sav["enabled"] and sav["status"] == KEY_OK, sav["status"] == KEY_AUTH_FAIL)
+        _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], sav["label"] if sav["status"] == KEY_OK else f"{sav['label']} fail" if sav["status"] == KEY_AUTH_FAIL else f"{sav['label']} init", sav["enabled"] and sav["status"] == KEY_OK, sav["status"] == KEY_AUTH_FAIL)
         _lamp(lamp_widgets["Restart"], lamp_vars["Restart"], "Restart", snap["restart"], snap["restart"])
         _lamp(lamp_widgets["Time"], lamp_vars["Time"], "Time", snap["need_time"], snap["need_time"])
         _lamp(lamp_widgets["Local"], lamp_vars["Local"], "Local", snap["local"], snap["local"])
@@ -145,6 +147,9 @@ def run_gui(host) -> None:
             "",
             "Secure session",
             f"Authentication   {'On' if sav['enabled'] else 'Off'}",
+            f"Version          {sav['label']}",
+            f"MAC              {sav['mac_name']}",
+            f"Key wrap         {sav['wrap_name']}",
             f"Key status       {_key_name(sav['status'])}",
             f"User             {sav['user']}",
             f"KSQ              {sav['ksq']}",
@@ -156,7 +161,9 @@ def run_gui(host) -> None:
             sav["result"],
         ])
         _fill(security, [
-            f"Session     {'OFF' if not sav['enabled'] else _key_name(sav['status'])}",
+            f"Session     {'OFF' if not sav['enabled'] else sav['label'] + ' ' + _key_name(sav['status'])}",
+            f"MAC         {sav['mac_name']}",
+            f"Key wrap    {sav['wrap_name']}",
             f"User        {sav['user']}",
             f"KSQ         {sav['ksq']}",
             f"Next CSQ    {sav['csq']}",
@@ -169,7 +176,7 @@ def run_gui(host) -> None:
             "Update key",
             sav["key"],
             "",
-            "HMAC-SHA-256-16 · AES-256 key wrap · user 1 Operator",
+            "HMAC matches the selected version. SAv2 is HMAC-SHA-1-8 and AES-128. SAv5 is HMAC-SHA-256-16 and AES-256.",
         ])
         selected = points.selection()
         points.delete(*points.get_children())

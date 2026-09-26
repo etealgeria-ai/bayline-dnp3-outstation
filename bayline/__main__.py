@@ -10,7 +10,7 @@ import time
 from bayline.codec import frame_size
 from bayline.outstation import flush_unsolicited, handle_frame, housekeep, write_point
 from bayline.sim import simulate
-from bayline.station import LogItem, create_station, find_point
+from bayline.station import LogItem, auth_profile, create_station, find_point, reset_session_keys, update_key_material
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 20000
@@ -111,6 +111,7 @@ class Host:
             now = int(time.time() * 1000)
             frames = [item for item in station.log if item.direction in ("in", "out")]
             last = frames[-1].time if frames else None
+            profile = auth_profile(sav)
             return {
                 "name": station.name,
                 "outstation": station.outstation,
@@ -138,6 +139,10 @@ class Host:
                 "quiet": None if last is None else max(0, now - last),
                 "sav": {
                     "enabled": sav.enabled,
+                    "version": profile.version,
+                    "label": profile.label,
+                    "mac_name": profile.mac_name,
+                    "wrap_name": profile.wrap_name,
                     "aggressive": sav.aggressive,
                     "user": sav.user,
                     "status": sav.os.status,
@@ -146,7 +151,7 @@ class Host:
                     "ok": sav.ok_count,
                     "fail": sav.fail_count,
                     "result": sav.last_result,
-                    "key": sav.update_key.hex(),
+                    "key": update_key_material(sav).hex(),
                 },
                 "points": [(p.kind, p.index, p.name, p.value, p.units, p.manual) for p in station.points],
                 "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
@@ -172,6 +177,17 @@ class Host:
             point = find_point(self.station, kind, index)
             if point:
                 point.manual = False
+
+    def set_auth_version(self, version: int) -> None:
+        if version not in (2, 5):
+            return
+        with self.lock:
+            sav = self.station.sav5
+            sav.version = version
+            reset_session_keys(sav)
+            label = auth_profile(sav).label
+            sav.last_result = f"{label} selected. Session keys were cleared. The master must wrap a new pair."
+        self._note(f"{label} selected")
 
     def set_flag(self, name: str, value: bool) -> None:
         with self.lock:

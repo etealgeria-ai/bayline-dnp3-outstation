@@ -47,15 +47,13 @@ from bayline.codec import (
     to_hex,
 )
 from bayline.crypto import (
-    CHALLENGE_LEN,
-    MAC_LEN,
-    SESSION_KEY_LEN,
     UK_CHALLENGE_LEN,
-    UPDATE_KEY_LEN,
+    aes_unwrap,
     aes256_unwrap,
     hmac_sha256,
     random_bytes,
     same_bytes,
+    session_mac,
 )
 from bayline.station import (
     ERR_AUTH_FAILED,
@@ -66,11 +64,10 @@ from bayline.station import (
     KEY_AUTH_FAIL,
     KEY_NOT_INIT,
     KEY_OK,
-    KWA,
-    MAL,
     PROVISIONED_USER,
     RESTART_FLAG,
     UK_METHOD,
+    UPDATE_KEY_LEN,
     DnpEvent,
     PendingAuth,
     PendingConfirm,
@@ -78,12 +75,14 @@ from bayline.station import (
     Point,
     SelectArm,
     Station,
+    auth_profile,
     find_point,
     is_critical,
     outstation_now,
     points_of,
     reset_session_keys,
     sync_binary_flag,
+    update_key_material,
 )
 
 FRAGMENT = 230
@@ -902,7 +901,7 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
     station.sav5.fail_count += 1
     station.sav5.last_error = code
     station.sav5.last_result = text
-    _log(station, "note", f"SAv5 {ERR_NAME.get(code, 'error')}", text, "", False, now)
+    _log(station, "note", f"{auth_profile(station.sav5).label} {ERR_NAME.get(code, 'error')}", text, "", False, now)
     body = bytearray()
     push_u32(body, seq_field)
     push_u16(body, user)
@@ -914,13 +913,14 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
 
 
 def _key_status(station: Station, user: int) -> bytes:
+    profile = auth_profile(station.sav5)
     os = station.sav5.os
-    mal = MAL if os.status == KEY_OK and len(os.last_status_mac) == MAC_LEN else 0
+    mal = profile.mal if os.status == KEY_OK and len(os.last_status_mac) == profile.mac_len else 0
     mac = os.last_status_mac if mal else b""
     body = bytearray()
     push_u32(body, os.ksq)
     push_u16(body, user)
-    push_u8(body, KWA)
+    push_u8(body, profile.kwa)
     push_u8(body, os.status)
     push_u8(body, mal)
     push_u16(body, len(os.key_challenge))
@@ -955,8 +955,9 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     if user != PROVISIONED_USER:
         return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. Only user 1 (Operator) is provisioned.", now)
     os = station.sav5.os
-    os.last_status_mac = hmac_sha256(os.monitor_key, apdu_in, MAC_LEN) if os.status == KEY_OK and len(os.monitor_key) == 32 else b""
-    os.key_challenge = random_bytes(CHALLENGE_LEN)
+    profile = auth_profile(station.sav5)
+    os.last_status_mac = _mac(station, os.monitor_key, apdu_in) if os.status == KEY_OK and len(os.monitor_key) == profile.key_len else b""
+    os.key_challenge = random_bytes(profile.challenge_len)
     _log(station, "note", f"Key status KSQ {os.ksq}", "g120v5", "", True, now)
     return [_auth_response(station, seq, _key_status(station, user))]
 
@@ -968,10 +969,11 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     if user != PROVISIONED_USER:
         return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key.", now, ksq)
     os = station.sav5.os
-    plain = aes256_unwrap(station.sav5.update_key, wrapped)
+    profile = auth_profile(station.sav5)
+    plain = aes_unwrap(update_key_material(station.sav5), wrapped)
     unwrapped = None
-    if plain and len(plain) == SESSION_KEY_LEN * 2 + CHALLENGE_LEN:
-        unwrapped = (plain[:32], plain[32:64], plain[64:])
+    if plain and len(plain) == profile.key_len * 2 + profile.challenge_len:
+        unwrapped = (plain[: profile.key_len], plain[profile.key_len : profile.key_len * 2], plain[profile.key_len * 2 :])
     seq_ok = ksq == os.ksq
     challenge_ok = unwrapped is not None and same_bytes(unwrapped[2], os.key_challenge)
     if unwrapped is None or not challenge_ok or not seq_ok:
@@ -979,18 +981,18 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         os.control_key = b""
         os.monitor_key = b""
         os.last_status_mac = b""
-        os.key_challenge = random_bytes(CHALLENGE_LEN)
+        os.key_challenge = random_bytes(profile.challenge_len)
         station.sav5.pending = None
         station.sav5.fail_count += 1
         station.sav5.last_error = ERR_AUTH_FAILED
-        station.sav5.last_result = "AES-256 unwrap failed. The update key does not match, so the session stays at AUTH_FAIL." if seq_ok else f"Key change sequence {ksq} did not match KSQ {os.ksq}."
+        station.sav5.last_result = f"{profile.wrap_name} unwrap failed. The update key does not match, so the session stays at AUTH_FAIL." if seq_ok else f"Key change sequence {ksq} did not match KSQ {os.ksq}."
         _log(station, "note", "Session key change rejected · AUTH_FAIL", station.sav5.last_result, "", False, now)
         return [_auth_response(station, seq, _key_status(station, user))]
     os.control_key, os.monitor_key = unwrapped[0], unwrapped[1]
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     os.status = KEY_OK
-    os.last_status_mac = hmac_sha256(os.monitor_key, apdu_in, MAC_LEN)
-    os.key_challenge = random_bytes(CHALLENGE_LEN)
+    os.last_status_mac = _mac(station, os.monitor_key, apdu_in)
+    os.key_challenge = random_bytes(profile.challenge_len)
     station.sav5.pending = None
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
@@ -999,8 +1001,14 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     return [_auth_response(station, seq, _key_status(station, user))]
 
 
+def _mac(station: Station, key: bytes, message: bytes) -> bytes:
+    profile = auth_profile(station.sav5)
+    return session_mac(key, message, profile.mac_len, profile.version == 2)
+
+
 def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
-    if len(body) < 6 + MAC_LEN:
+    profile = auth_profile(station.sav5)
+    if len(body) < 6 + profile.mac_len:
         return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Reply did not match an open challenge.", now)
     csq, user, mac = _u32(body, 0), _u16(body, 4), body[6:]
     pending = station.sav5.pending
@@ -1009,23 +1017,25 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
     if csq != pending.csq or user != pending.user:
         station.sav5.pending = None
         return _auth_fail(station, seq, user, ERR_UNEXPECTED, f"Reply CSQ {csq} user {user} does not match challenge CSQ {pending.csq}.", now, csq)
-    if len(station.sav5.os.control_key) != 32:
+    if len(station.sav5.os.control_key) != profile.key_len:
         station.sav5.pending = None
         return _auth_fail(station, seq, user, ERR_AUTH_FAILED, "No control-direction session key for this user.", now, csq)
-    expect = hmac_sha256(station.sav5.os.control_key, pending.challenge_apdu + pending.critical_apdu, MAC_LEN)
+    expect = _mac(station, station.sav5.os.control_key, pending.challenge_apdu + pending.critical_apdu)
     if not same_bytes(expect, mac):
         station.sav5.pending = None
         return _auth_fail(station, seq, user, ERR_AUTH_FAILED, "HMAC mismatch. The critical request was discarded.", now, csq)
     station.sav5.pending = None
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
-    station.sav5.last_result = f"HMAC accepted for CSQ {csq}. The held request is executing."
-    _log(station, "note", f"SAv5 HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
+    station.sav5.last_result = f"{profile.label} HMAC accepted for CSQ {csq}. The held request is executing."
+    _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
     station.sav5.bypass = True
     return process_app(station, bytes((0xC0,)) + pending.critical_apdu, now)
 
 
 def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
+    if auth_profile(station.sav5).version == 2:
+        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "SAv2 does not change the update key on the wire. Change it out of band.", now)
     if len(body) < 5:
         return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Malformed update-key change request.", now)
     method = body[0]
@@ -1087,16 +1097,17 @@ def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) ->
     if aggressive or mac:
         return _check_aggressive(station, apdu, user, aggressive, mac, now)
     os = station.sav5.os
-    if os.status != KEY_OK or len(os.control_key) != 32:
+    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len:
         return _auth_fail(station, apdu.seq, user_no, ERR_AUTH_FAILED, "Session keys are not valid. Send a key status request and a key change before this control.", now)
+    profile = auth_profile(station.sav5)
     csq = max(os.csq, (os.accepted_csq + 1) & 0xFFFFFFFF) & 0xFFFFFFFF
     os.accepted_csq = csq
     os.csq = (csq + 1) & 0xFFFFFFFF
-    data = random_bytes(CHALLENGE_LEN)
+    data = random_bytes(profile.challenge_len)
     body = bytearray()
     push_u32(body, csq)
     push_u16(body, user_no)
-    push_u8(body, MAL)
+    push_u8(body, profile.mal)
     push_u8(body, 1)
     body.extend(data)
     challenge = _auth_response(station, apdu.seq, _sized(120, 1, bytes(body)))
@@ -1116,7 +1127,7 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     os = station.sav5.os
     if who != PROVISIONED_USER or who != user_no:
         return _auth_fail(station, apdu.seq, who, ERR_UNKNOWN_USER, f"Aggressive mode user {who} is not the association user.", now, csq)
-    if os.status != KEY_OK or len(os.control_key) != 32 or not os.challenge_apdu:
+    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len or not os.challenge_apdu:
         return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive mode needs a prior challenge and valid session keys.", now, csq)
     if csq != ((os.accepted_csq + 1) & 0xFFFFFFFF):
         return _auth_fail(station, apdu.seq, who, ERR_UNEXPECTED, f"Aggressive CSQ {csq} was not {os.accepted_csq + 1}.", now, csq)
@@ -1125,7 +1136,7 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     if mac_object_len > len(apdu_in) or apdu_in[-mac_object_len] != 120 or apdu_in[-mac_object_len + 1] != 9:
         return _auth_fail(station, apdu.seq, who, ERR_UNEXPECTED, "The MAC object was not at the end of the fragment.", now, csq)
     signed = apdu_in[: len(apdu_in) - mac_object_len]
-    expect = hmac_sha256(os.control_key, os.challenge_apdu + signed, MAC_LEN)
+    expect = _mac(station, os.control_key, os.challenge_apdu + signed)
     if not same_bytes(expect, mac):
         return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive-mode HMAC mismatch. The control was not executed.", now, csq)
     os.accepted_csq = csq

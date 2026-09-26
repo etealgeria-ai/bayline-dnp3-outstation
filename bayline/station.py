@@ -110,6 +110,7 @@ class PendingUpdateKey:
 @dataclass
 class Sav5:
     enabled: bool = True
+    version: int = 5
     aggressive: bool = False
     user: int = PROVISIONED_USER
     update_key: bytes = field(default_factory=lambda: hex_to_bytes(DEFAULT_UPDATE_KEY_HEX, UPDATE_KEY_LEN) or b"")
@@ -120,7 +121,30 @@ class Sav5:
     ok_count: int = 0
     fail_count: int = 0
     last_error: int = 0
-    last_result: str = "Session keys are not initialized. The first critical control will wrap a fresh pair."
+    last_result: str = "SAv5 selected. Session keys are not initialized."
+
+
+@dataclass
+class AuthProfile:
+    version: int
+    mal: int
+    mac_len: int
+    kwa: int
+    key_len: int
+    challenge_len: int
+    label: str
+    mac_name: str
+    wrap_name: str
+
+
+def auth_profile(sav: Sav5) -> AuthProfile:
+    if sav.version == 2:
+        return AuthProfile(2, 5, 8, 1, 16, 8, "SAv2", "HMAC-SHA-1-8", "AES-128")
+    return AuthProfile(5, 4, 16, 2, 32, 16, "SAv5", "HMAC-SHA-256-16", "AES-256")
+
+
+def update_key_material(sav: Sav5) -> bytes:
+    return sav.update_key[: auth_profile(sav).key_len]
 
 
 @dataclass

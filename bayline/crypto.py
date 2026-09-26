@@ -42,22 +42,39 @@ def hex_to_bytes(text: str, length: int | None = None) -> bytes | None:
     return bytes.fromhex(cleaned)
 
 
-def hmac_sha256(key: bytes, message: bytes, length: int = MAC_LEN) -> bytes:
-    return hmac.new(key, message, hashlib.sha256).digest()[:length]
+def session_mac(key: bytes, message: bytes, length: int, sha1: bool) -> bytes:
+    digest = hashlib.sha1 if sha1 else hashlib.sha256
+    return hmac.new(key, message, digest).digest()[:length]
 
 
-def aes256_wrap(kek: bytes, plaintext: bytes) -> bytes:
-    if len(kek) != UPDATE_KEY_LEN:
-        raise ValueError("AES-256 key wrap wants a 32-octet key")
+def aes_wrap(kek: bytes, plaintext: bytes) -> bytes:
+    if len(kek) not in (16, 32):
+        raise ValueError("Key wrap wants a 16-octet or 32-octet key")
     if len(plaintext) < 16 or len(plaintext) % 8:
         raise ValueError("Key-wrap plaintext must be a multiple of 8, at least 16")
     return aes_key_wrap(kek, plaintext)
 
 
-def aes256_unwrap(kek: bytes, wrapped: bytes) -> bytes | None:
-    if len(kek) != UPDATE_KEY_LEN or len(wrapped) < 24 or len(wrapped) % 8:
+def aes_unwrap(kek: bytes, wrapped: bytes) -> bytes | None:
+    if len(kek) not in (16, 32) or len(wrapped) < 24 or len(wrapped) % 8:
         return None
     try:
         return aes_key_unwrap(kek, wrapped)
     except InvalidUnwrap:
         return None
+
+
+def hmac_sha256(key: bytes, message: bytes, length: int = MAC_LEN) -> bytes:
+    return session_mac(key, message, length, False)
+
+
+def aes256_wrap(kek: bytes, plaintext: bytes) -> bytes:
+    if len(kek) != UPDATE_KEY_LEN:
+        raise ValueError("AES-256 key wrap wants a 32-octet key")
+    return aes_wrap(kek, plaintext)
+
+
+def aes256_unwrap(kek: bytes, wrapped: bytes) -> bytes | None:
+    if len(kek) != UPDATE_KEY_LEN:
+        return None
+    return aes_unwrap(kek, wrapped)
