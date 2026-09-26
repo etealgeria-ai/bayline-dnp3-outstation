@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+
 from bayline.codec import (
     FC_AUTH_REQUEST,
     FC_AUTH_RESPONSE,
@@ -29,6 +32,7 @@ from bayline.codec import (
     ParsedObject,
     decode_frame,
     describe_frame,
+    describe_user,
     encode_frame,
     object_size,
     parse_apdu,
@@ -49,8 +53,6 @@ from bayline.codec import (
 from bayline.crypto import (
     UK_CHALLENGE_LEN,
     aes_unwrap,
-    aes256_unwrap,
-    hmac_sha256,
     random_bytes,
     same_bytes,
     session_mac,
@@ -59,38 +61,41 @@ from bayline.station import (
     ERR_AGGRESSIVE,
     ERR_AUTH_FAILED,
     ERR_AUTHORIZATION,
-    ERR_KEY_STATUS_LIMIT,
+    ERR_CERTIFICATION,
     ERR_SIGNATURE,
     ERR_UK_METHOD,
     ERR_UNEXPECTED,
     ERR_UNKNOWN_USER,
+    KEY_CHANGE_METHODS,
     KEY_AUTH_FAIL,
-    KEY_NOT_INIT,
     KEY_OK,
     PROVISIONED_USER,
     RESTART_FLAG,
-    UK_METHOD,
-    UPDATE_KEY_LEN,
+    ROLE_NAMES,
     DnpEvent,
     PendingAuth,
     PendingConfirm,
+    PendingStatusChange,
     PendingUpdateKey,
     Point,
+    SaUser,
     SelectArm,
     Station,
     auth_profile,
     find_point,
-    is_critical,
+    find_user_by_name,
     outstation_now,
     points_of,
     reset_session_keys,
-    role_can_control,
+    reset_user_session,
+    role_permits,
     sync_binary_flag,
     update_key_material,
 )
 
-FRAGMENT = 230
-ERR_NAME = {1: "authentication failed", 2: "unexpected response", 4: "aggressive mode not supported", 7: "authorization failed", 8: "update-key method not permitted", 9: "invalid signature", 11: "unknown user", 12: "too many key status requests"}
+FRAGMENT = 2048
+SEGMENT = 249
+ERR_NAME = {1: "authentication failed", 2: "unexpected response", 4: "aggressive mode not supported", 5: "MAC algorithm not supported", 7: "authorization failed", 8: "update-key method not permitted", 9: "invalid signature", 10: "invalid certification data", 11: "unknown user", 12: "too many key status requests"}
 
 
 class Built:
@@ -222,10 +227,13 @@ def process_app(station: Station, user: bytes, now: int) -> list[bytes]:
         return _auth_request(station, apdu, user, now)
     already = station.sav5.bypass
     station.sav5.bypass = False
-    if station.sav5.enabled and _needs_auth(station, apdu) and not already:
-        held = _gate_critical(station, apdu, user, now)
-        if held is not None:
-            return held
+    if station.sav5.enabled and not already:
+        aggressive = any(obj.group == 120 for obj in apdu.objects)
+        if aggressive or _needs_auth(station, apdu):
+            held = _gate_critical(station, apdu, user, now, _needs_auth(station, apdu))
+            if held is not None:
+                return held
+    apdu.objects = [obj for obj in apdu.objects if obj.group != 120]
     if fc == FC_READ:
         built = _read_objects(station, apdu, now)
         objects = bytes(built.bytes)
@@ -235,7 +243,7 @@ def process_app(station: Station, user: bytes, now: int) -> list[bytes]:
         extra2 |= _write_objects(station, apdu, now)
     elif fc in (FC_SELECT, FC_OPERATE, FC_DIRECT_OPERATE, FC_DIRECT_OPERATE_NR):
         mode = {FC_SELECT: "select", FC_OPERATE: "operate", FC_DIRECT_OPERATE: "direct"}.get(fc, "nr")
-        objects, bit = _command(station, apdu, now, mode)
+        objects, bit = _command(station, apdu, user, now, mode)
         extra2 |= bit
         if mode == "nr":
             return []
@@ -244,18 +252,12 @@ def process_app(station: Station, user: bytes, now: int) -> list[bytes]:
         if fc in (FC_IMMED_FREEZE_NR, FC_FREEZE_CLEAR_NR):
             return []
     elif fc == FC_COLD_RESTART:
-        if role_can_control(station.sav5):
-            _cold_restart(station, now)
-        else:
-            station.sav5.last_result = f"{station.sav5.role} cannot restart the outstation."
+        _cold_restart(station, now)
         objects = _delay(1000)
     elif fc == FC_WARM_RESTART:
-        if role_can_control(station.sav5):
-            station.restart = True
-            station.need_time = True
-            station.select = None
-        else:
-            station.sav5.last_result = f"{station.sav5.role} cannot restart the outstation."
+        station.restart = True
+        station.need_time = True
+        station.select = None
         objects = _delay(200)
     elif fc in (FC_ENABLE_UNSOL, FC_DISABLE_UNSOL):
         extra2 |= _set_unsol(station, apdu, fc == FC_ENABLE_UNSOL)
@@ -452,78 +454,87 @@ def _write_objects(station: Station, apdu: ParsedApdu, now: int) -> int:
 
 
 def _apply_iin(station: Station, obj: ParsedObject, now: int) -> bool:
-    if not obj.items:
+    """A master clears IIN1.7 (device restart) by writing 0 to g80v1 index 7. No other bit is writable."""
+    if not obj.items or obj.all:
         return False
     raw = obj.items[0].raw
-    indexes = list(range(16)) if obj.all else obj.indexes
-    for i, index in enumerate(indexes):
+    for i, index in enumerate(obj.indexes):
         on = ((raw[i >> 3] if i >> 3 < len(raw) else 0) >> (i & 7)) & 1
-        if not on:
-            continue
-        if index == 4:
-            station.need_time = False
-        if index == 5:
-            station.local = False
-            remote = find_point(station, "bi", 10)
-            if remote:
-                write_point(station, remote, 1, remote.flags, now, "silent")
-        if index == 6:
-            station.trouble = False
-        if index == 7:
-            station.restart = False
-        if index == 11:
-            station.overflow = False
+        if index != 7 or on:
+            return False
+    station.restart = False
+    del now
     return True
 
 
-def _command(station: Station, apdu: ParsedApdu, now: int, mode: str) -> tuple[bytes, int]:
-    items = []
-    for obj in apdu.objects:
-        if obj.group not in (12, 41):
-            continue
+MAX_CONTROLS = 16
+
+
+def _command(station: Station, apdu: ParsedApdu, user: bytes, now: int, mode: str) -> tuple[bytes, int]:
+    """Run every CROB and analog output in the request and echo the request headers with each status patched in."""
+    headers = [obj for obj in apdu.objects if obj.group in (12, 41)]
+    if not headers or len(headers) != len(apdu.objects):
+        return b"", 0x02 if any(obj.group not in (12, 41) for obj in apdu.objects) else 0x04
+    for obj in headers:
+        if (obj.group == 12 and obj.variation != 1) or (obj.group == 41 and object_size(41, obj.variation) is None):
+            return b"", 0x02
+    items: list[tuple[int, int, int, bytes, int]] = []
+    for obj in headers:
+        prefix, rng = obj.qualifier >> 4, obj.qualifier & 0x0F
+        width = {1: 1, 2: 2, 3: 4}.get(prefix, 0) if rng in (7, 8, 9) else 0
+        count = len(obj.items)
         for i, item in enumerate(obj.items):
             index = item.index if item.index is not None else (obj.indexes[i] if i < len(obj.indexes) else 0)
-            items.append((obj.group, obj.variation, index, item.raw))
-    if len(items) != 1:
+            status_at = obj.end - 1 - (count - 1 - i) * (len(item.raw) + width)
+            items.append((obj.group, obj.variation, index, item.raw, status_at))
+    if not items:
         return b"", 0x04
-    group, variation, index, raw = items[0]
-    if group == 12 and variation != 1:
-        return b"", 0x02
-    if group == 41 and object_size(41, variation) is None:
-        return b"", 0x02
-    body_key = raw[:-1]
-    status = 0
-    extra2 = 0
+    wanted = [(g, v, i, raw[:-1]) for g, v, i, raw, _at in items]
     armed = station.select
-    same = bool(armed and armed.group == group and armed.variation == variation and armed.index == index and armed.body == body_key)
-    if mode == "select":
-        if armed and not same and now <= armed.deadline:
-            status, extra2 = 5, 0x10
-        elif station.local:
-            status = 7
-        else:
-            station.select = SelectArm(group, variation, index, body_key, now + station.select_timeout)
+    extra2 = 0
+    statuses: list[int] = []
+    if len(items) > MAX_CONTROLS:
+        statuses = [8] * len(items)
+    elif mode == "select":
+        busy = bool(armed and armed.items != wanted and now <= armed.deadline)
+        for group, variation, index, raw, _at in items:
+            statuses.append(5 if busy else 7 if station.local else _check(station, group, index, raw))
+        if busy:
+            extra2 = 0x10
+        elif all(code == 0 for code in statuses):
+            first = wanted[0]
+            station.select = SelectArm(first[0], first[1], first[2], first[3], now + station.select_timeout, wanted)
     elif mode == "operate":
         if armed and now > armed.deadline:
-            status = 1
+            statuses = [1] * len(items)
             station.select = None
-        elif not same:
-            status = 2
+        elif not armed or armed.items != wanted:
+            statuses = [2] * len(items)
         else:
-            status = _execute(station, group, variation, index, raw, now)
+            statuses = [_execute(station, g, v, i, raw, now) for g, v, i, raw, _at in items]
             station.select = None
     else:
-        status = _execute(station, group, variation, index, raw, now)
-    echoed = bytearray(raw)
-    echoed[-1] = status
-    return bytes((group, variation, 0x17, 1, index & 0xFF)) + bytes(echoed), extra2
+        statuses = [_execute(station, g, v, i, raw, now) for g, v, i, raw, _at in items]
+    echo = bytearray(user)
+    for (_g, _v, _i, _raw, at), status in zip(items, statuses):
+        echo[at] = status
+    return b"".join(bytes(echo[obj.offset : obj.end]) for obj in headers), extra2
+
+
+def _check(station: Station, group: int, index: int, raw: bytes) -> int:
+    """Validate a control at select time without acting on it."""
+    if group == 12:
+        bo = find_point(station, "bo", index)
+        if not bo:
+            return 4
+        return 3 if raw[0] & 0x0F > 4 else 0
+    ao = find_point(station, "ao", index)
+    return 0 if ao else 4
 
 
 def _execute(station: Station, group: int, variation: int, index: int, raw: bytes, now: int) -> int:
     if station.local:
         return 7
-    if group in (12, 41) and not role_can_control(station.sav5):
-        return 9
     if group == 12:
         bo = find_point(station, "bo", index)
         if not bo:
@@ -532,6 +543,10 @@ def _execute(station: Station, group: int, variation: int, index: int, raw: byte
         op, tcc = code & 0x0F, (code >> 6) & 0x03
         if op > 4:
             return 3
+        if bo.action:
+            if tcc == 2 or (tcc == 0 and op in (2, 4)):
+                return 4
+            return _action(station, bo.action, now)
         nxt = 1 if bo.value >= 0.5 else 0
         if tcc == 2:
             nxt = 0
@@ -558,6 +573,42 @@ def _execute(station: Station, group: int, variation: int, index: int, raw: byte
     if measured:
         measured.manual = False
     return 0
+
+
+TAP_LIMIT = 16
+
+
+def _action(station: Station, action: str, now: int) -> int:
+    """Momentary outputs: the tap changer and the recloser lockout reset."""
+    if action in ("tap_up", "tap_down"):
+        auto = find_point(station, "bi", 13)
+        if auto and auto.value >= 0.5:
+            return 10
+        tap = find_point(station, "ai", 12)
+        if tap is None:
+            return 4
+        step = 1 if action == "tap_up" else -1
+        if not -TAP_LIMIT <= tap.value + step <= TAP_LIMIT:
+            return 12
+        step_tap(station, step, now)
+        return 0
+    if action == "reset_79":
+        for index in (7, 18):
+            lockout = find_point(station, "bi", index)
+            if lockout and lockout.value >= 0.5:
+                write_point(station, lockout, 0, lockout.flags, now, "control")
+        return 0
+    return 4
+
+
+def step_tap(station: Station, step: int, now: int) -> None:
+    tap = find_point(station, "ai", 12)
+    if tap is None:
+        return
+    write_point(station, tap, max(-TAP_LIMIT, min(TAP_LIMIT, tap.value + step)), tap.flags, now, "control")
+    counter = find_point(station, "ctr", 4)
+    if counter:
+        write_point(station, counter, counter.value + 1, counter.flags, now, "control")
 
 
 def _freeze(station: Station, apdu: ParsedApdu, now: int, clear: bool) -> bytes:
@@ -957,13 +1008,20 @@ def _apdu(seq: int, fc: int, iin1: int, iin2: int, objects: bytes, con: bool, un
 
 
 def _primary(station: Station, dest: int, apdu: bytes, now: int) -> bytes:
-    seq = station.tx_transport & 0x3F
-    station.tx_transport = (station.tx_transport + 1) & 0x3F
-    user = bytes((0xC0 | seq,)) + apdu
-    frame = encode_frame(0x44, dest, station.outstation, user)
-    summary, detail, ok = describe_frame(frame)
-    _log(station, "out", summary, detail, to_hex(frame), ok, now)
-    return frame
+    """Split one application fragment into transport segments, one link frame each."""
+    frames = bytearray()
+    chunks = [apdu[i : i + SEGMENT] for i in range(0, len(apdu), SEGMENT)] or [b""]
+    for n, chunk in enumerate(chunks):
+        seq = station.tx_transport & 0x3F
+        station.tx_transport = (station.tx_transport + 1) & 0x3F
+        header = (0x40 if n == 0 else 0) | (0x80 if n == len(chunks) - 1 else 0)
+        # FIR is bit 6 and FIN is bit 7 of the transport header.
+        frames.extend(encode_frame(0x44, dest, station.outstation, bytes((header | seq,)) + chunk))
+    summary, _detail, ok = describe_user(bytes((0xC0,)) + apdu)
+    if len(chunks) > 1:
+        summary += f"  ({len(chunks)} segments, {len(apdu)} octets)"
+    _log(station, "out", summary, "", to_hex(frames), ok, now)
+    return bytes(frames)
 
 
 def _secondary(station: Station, dest: int, func: int, now: int) -> bytes:
@@ -994,6 +1052,8 @@ def _sized(group: int, variation: int, body: bytes) -> bytes:
     return bytes((group, variation, 0x5B, 1, len(body) & 0xFF, (len(body) >> 8) & 0xFF)) + body
 
 
+
+
 def _auth_response(station: Station, seq: int, objects: bytes) -> bytes:
     i1, i2 = live_iin(station)
     return _apdu(seq, FC_AUTH_RESPONSE, i1, i2, objects, False, False)
@@ -1010,7 +1070,7 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
     _stat(station, 10, now)
     if code == ERR_AUTHORIZATION:
         _stat(station, 1, now)
-    elif code == ERR_AUTH_FAILED:
+    elif code in (ERR_AUTH_FAILED, ERR_CERTIFICATION, ERR_SIGNATURE):
         _stat(station, 2, now)
     elif code == ERR_UNEXPECTED:
         _stat(station, 0, now)
@@ -1032,12 +1092,12 @@ def _status_echo_ok(echoed: bytes, status: bytes, mac: bytes) -> bool:
     return bool(full) and echoed.startswith(full)
 
 
-def _key_status(station: Station, user: int) -> bytes:
-    profile = auth_profile(station.sav5)
-    os = station.sav5.os
+def _key_status(station: Station, user: SaUser) -> bytes:
+    profile = auth_profile(station.sav5, user)
+    os = user.os
     data = bytearray()
     push_u32(data, os.ksq)
-    push_u16(data, user)
+    push_u16(data, user.number)
     push_u8(data, profile.kwa)
     push_u8(data, os.status)
     push_u8(data, profile.mal if os.status == KEY_OK and len(os.last_status_mac) == profile.mac_len else 0)
@@ -1048,91 +1108,116 @@ def _key_status(station: Station, user: int) -> bytes:
     return _sized(120, 5, bytes(data) + mac)
 
 
+def _live_user(station: Station, number: int, now: int) -> SaUser | None:
+    user = station.sav5.users.get(number)
+    if user is None or user.expired(now):
+        return None
+    return user
+
+
+def _clear_keys(user: SaUser) -> None:
+    user.os.status = KEY_AUTH_FAIL
+    user.os.control_key = b""
+    user.os.monitor_key = b""
+    user.os.last_status_mac = b""
+
+
 def _auth_request(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes]:
-    objects = [obj for obj in apdu.objects if obj.group == 120]
-    def raw(variation: int) -> bytes | None:
-        for obj in objects:
-            if obj.variation == variation and obj.items:
+    if apdu.uns:
+        _stat(station, 9, now)
+        _log(station, "note", "Authentication request with UNS set was discarded", "", "", False, now)
+        return []
+    first = next((obj for obj in apdu.objects if obj.group == 120), None)
+    variation = first.variation if first else 0
+
+    def raw(wanted: int) -> bytes | None:
+        for obj in apdu.objects:
+            if obj.group == 120 and obj.variation == wanted and obj.items:
                 return obj.items[0].raw
         return None
+
     apdu_in = user[1:]
-    if raw(4) is not None:
-        return _on_key_status(station, apdu.seq, raw(4) or b"", apdu_in, now)
-    if raw(6) is not None:
-        return _on_key_change(station, apdu.seq, raw(6) or b"", apdu_in, now)
-    if raw(2) is not None:
-        return _on_reply(station, apdu.seq, raw(2) or b"", now)
-    if raw(11) is not None:
-        return _on_update_request(station, apdu.seq, raw(11) or b"", now)
-    if raw(13) is not None:
-        return _on_update_change(station, apdu.seq, raw(13) or b"", raw(15), apdu_in, now)
-    return _auth_fail(station, apdu.seq, station.sav5.user, ERR_UNEXPECTED, "Authentication request was not a known g120 object.", now)
+    body = raw(variation) or b""
+    if variation == 4:
+        return _on_key_status(station, apdu.seq, body, now)
+    if variation == 6:
+        return _on_key_change(station, apdu.seq, body, apdu_in, now)
+    if variation == 2:
+        return _on_reply(station, apdu.seq, body, now)
+    if variation == 10:
+        return _on_user_status_change(station, apdu.seq, body, now)
+    if variation == 11:
+        return _on_update_request(station, apdu.seq, body, now)
+    if variation == 13:
+        return _on_update_change(station, apdu.seq, body, raw(15), now)
+    return _auth_fail(station, apdu.seq, 0, ERR_UNEXPECTED, "Authentication request was not a known g120 object.", now)
 
 
-def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now: int) -> list[bytes]:
-    user = _u16(body, 0) if len(body) >= 2 else 0
-    if user != station.sav5.user:
-        return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. The association user is {station.sav5.user} ({station.sav5.role}).", now)
+def _on_key_status(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
+    number = _u16(body, 0) if len(body) >= 2 else 0
+    user = _live_user(station, number, now)
+    if user is None:
+        return _auth_fail(station, seq, number, ERR_UNKNOWN_USER, f"User {number} has no update key on this outstation.", now)
     _expire_session(station, now)
-    os = station.sav5.os
+    os = user.os
     if os.status == KEY_OK and os.key_status_count >= station.sav5.max_key_status_requests:
-        os.status = KEY_AUTH_FAIL
-        os.control_key = b""
-        os.monitor_key = b""
-        os.last_status_mac = b""
+        _clear_keys(user)
         os.key_status_count = 0
         _stat(station, 4, now)
-        station.sav5.last_result = "Session keys cleared after the key-status limit. The next key status lets the master rekey."
+        station.sav5.last_result = f"User {number} session keys cleared after the key-status limit. The next key status lets the master rekey."
         _log(station, "note", "Key-status limit · session keys cleared", station.sav5.last_result, "", False, now)
     os.key_status_count += 1
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
-    profile = auth_profile(station.sav5)
-    if os.status == KEY_OK and os.last_key_change and len(os.monitor_key) == profile.key_len:
+    profile = auth_profile(station.sav5, user)
+    if os.status == KEY_OK and os.last_key_change and os.monitor_key:
         os.last_status_mac = _mac(station, os.monitor_key, os.last_key_change)
     else:
         os.last_status_mac = b""
     os.key_challenge = random_bytes(profile.challenge_len)
-    _log(station, "note", f"Key status KSQ {os.ksq}", "g120v5", "", True, now)
+    _log(station, "note", f"Key status user {number} KSQ {os.ksq}", "g120v5", "", True, now)
     return [_auth_response(station, seq, _key_status(station, user))]
 
 
 def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now: int) -> list[bytes]:
-    user = _u16(body, 4) if len(body) >= 6 else station.sav5.user
+    number = _u16(body, 4) if len(body) >= 6 else 0
     ksq = _u32(body, 0) if len(body) >= 4 else 0
     wrapped = body[6:] if len(body) >= 6 else b""
-    if user != station.sav5.user:
-        return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key.", now, ksq)
-    os = station.sav5.os
-    profile = auth_profile(station.sav5)
-    plain = aes_unwrap(update_key_material(station.sav5), wrapped)
+    user = _live_user(station, number, now)
+    if user is None:
+        return _auth_fail(station, seq, number, ERR_UNKNOWN_USER, f"User {number} has no update key on this outstation.", now, ksq)
+    os = user.os
+    profile = auth_profile(station.sav5, user)
+    plain = aes_unwrap(update_key_material(station.sav5, user), wrapped)
     unwrapped = None
     status_ok = False
-    if plain and len(plain) >= 2 + profile.key_len * 2:
+    if plain and len(plain) >= 2:
         key_len = plain[0] | (plain[1] << 8)
         control = plain[2 : 2 + key_len]
         monitor = plain[2 + key_len : 2 + key_len * 2]
         echoed = plain[2 + key_len * 2 :]
-        status_ok = key_len == profile.key_len and _status_echo_ok(echoed, os.last_key_status, os.last_status_mac)
+        sized = len(monitor) == key_len and profile.session_key_ok(control)
+        status_ok = sized and _status_echo_ok(echoed, os.last_key_status, os.last_status_mac)
         if status_ok:
             unwrapped = (control, monitor)
     seq_ok = len(os.last_key_status) >= 4 and ksq == _u32(os.last_key_status, 0)
-    if unwrapped is None or not status_ok or not seq_ok:
-        os.status = KEY_AUTH_FAIL
-        os.control_key = b""
-        os.monitor_key = b""
-        os.last_status_mac = b""
+    if unwrapped is None or not seq_ok:
+        _clear_keys(user)
         os.key_challenge = random_bytes(profile.challenge_len)
         station.sav5.pending = None
         station.sav5.fail_count += 1
         station.sav5.last_error = ERR_AUTH_FAILED
-        station.sav5.last_result = f"{profile.wrap_name} unwrap failed. The wrapped key status does not match the last g120v5." if seq_ok else f"Key change sequence {ksq} does not match the last transmitted KSQ."
+        station.sav5.last_result = (
+            f"{profile.wrap_name} unwrap failed for user {number}. The wrapped key status does not match the last g120v5."
+            if seq_ok
+            else f"Key change sequence {ksq} does not match the last KSQ sent to user {number}."
+        )
         _stat(station, 14, now)
         _stat(station, 4, now)
         _stat(station, 2, now)
         os.ksq = (os.ksq + 1) & 0xFFFFFFFF
         _log(station, "note", "Session key change rejected · AUTH_FAIL", station.sav5.last_result, "", False, now)
         return [_auth_response(station, seq, _key_status(station, user))]
-    os.control_key, os.monitor_key = unwrapped[0], unwrapped[1]
+    os.control_key, os.monitor_key = unwrapped
     os.last_key_change = apdu_in
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     os.status = KEY_OK
@@ -1147,120 +1232,198 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     station.sav5.error_burst = 0
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
-    station.sav5.last_result = f"Session keys installed. KSQ {os.ksq}."
-    _log(station, "note", f"Session keys installed · KSQ {os.ksq}", "g120v6 unwrapped with the update key.", "", True, now)
+    station.sav5.last_result = f"Session keys installed for user {number} ({user.name}). KSQ {os.ksq}."
+    _log(station, "note", f"Session keys installed · user {number} · KSQ {os.ksq}", f"g120v6 unwrapped with the {profile.wrap_name} update key.", "", True, now)
     return [_auth_response(station, seq, _key_status(station, user))]
 
 
 def _mac(station: Station, key: bytes, message: bytes) -> bytes:
     profile = auth_profile(station.sav5)
-    return session_mac(key, message, profile.mac_len, profile.version == 2)
+    return session_mac(key, message, profile.mac_len, profile.sha1)
+
+
+def _authorize(station: Station, user: SaUser, fc: int) -> bool:
+    return role_permits(user.role, fc)
+
+
+def _count_auth(station: Station, user: SaUser, now: int) -> None:
+    sav = station.sav5
+    sav.ok_count += 1
+    sav.last_error = 0
+    sav.challenges_rx += 1
+    sav.last_user = user.number
+    sav.last_auth_time = now
+    sav.error_burst = 0
+    _stat(station, 12, now)
+    user.os.auth_count += 1
+    if user.os.auth_count >= sav.max_auth_messages:
+        _clear_keys(user)
+        sav.last_result = f"User {user.number} reached the authentication count. Wrap a new pair."
 
 
 def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
-    profile = auth_profile(station.sav5)
-    if len(body) < 6 + profile.mac_len:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Reply did not match an open challenge.", now)
-    csq, user, mac = _u32(body, 0), _u16(body, 4), body[6:]
-    pending = station.sav5.pending
+    sav = station.sav5
+    if len(body) < 6:
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "Reply did not match an open challenge.", now)
+    csq, number, mac = _u32(body, 0), _u16(body, 4), body[6:]
+    pending = sav.pending
     if pending is None:
-        return _auth_fail(station, seq, user, ERR_UNEXPECTED, "Reply did not match an open challenge.", now, csq)
-    if csq != pending.csq or user != pending.user:
-        station.sav5.pending = None
-        return _auth_fail(station, seq, user, ERR_UNEXPECTED, f"Reply CSQ {csq} user {user} does not match challenge CSQ {pending.csq}.", now, csq)
-    if len(station.sav5.os.control_key) != profile.key_len:
-        station.sav5.pending = None
-        return _auth_fail(station, seq, user, ERR_AUTH_FAILED, "No control-direction session key for this user.", now, csq)
-    expect = _mac(station, station.sav5.os.control_key, pending.challenge_apdu + pending.critical_apdu)
-    if not same_bytes(expect, mac):
-        station.sav5.pending = None
-        return _auth_fail(station, seq, user, ERR_AUTH_FAILED, "HMAC mismatch. The critical request was discarded.", now, csq)
-    station.sav5.pending = None
-    station.sav5.ok_count += 1
-    station.sav5.last_error = 0
-    station.sav5.last_result = f"{profile.label} HMAC accepted for CSQ {csq}. The held request is executing."
-    station.sav5.challenges_rx += 1
-    station.sav5.last_user = user
-    station.sav5.last_auth_time = now
-    _stat(station, 12, now)
-    station.sav5.error_burst = 0
-    station.sav5.os.auth_count += 1
-    if station.sav5.os.auth_count >= station.sav5.max_auth_messages:
-        station.sav5.os.status = KEY_AUTH_FAIL
-        station.sav5.os.control_key = b""
-        station.sav5.os.monitor_key = b""
-        station.sav5.os.last_status_mac = b""
-        station.sav5.last_result = "Session key change count reached. Wrap a new pair."
-    _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
-    station.sav5.bypass = True
-    station.sav5.os.accepted_csq = csq
+        return _auth_fail(station, seq, number, ERR_UNEXPECTED, "Reply did not match an open challenge.", now, csq)
+    sav.pending = None
+    if csq != pending.csq:
+        return _auth_fail(station, seq, number, ERR_UNEXPECTED, f"Reply CSQ {csq} does not match challenge CSQ {pending.csq}.", now, csq)
+    user = _live_user(station, number, now)
+    profile = auth_profile(sav, user)
+    if user is None or user.os.status != KEY_OK or not profile.session_key_ok(user.os.control_key):
+        return _auth_fail(station, seq, number, ERR_AUTH_FAILED, f"User {number} has no valid control-direction session key.", now, csq)
+    expect = _mac(station, user.os.control_key, pending.challenge_apdu + pending.critical_apdu)
+    if len(mac) != len(expect) or not same_bytes(expect, mac):
+        return _auth_fail(station, seq, number, ERR_AUTH_FAILED, "HMAC mismatch. The critical request was discarded.", now, csq)
+    _count_auth(station, user, now)
+    fc = pending.critical_apdu[1] if len(pending.critical_apdu) > 1 else 0
+    if not _authorize(station, user, fc):
+        return _auth_fail(station, seq, number, ERR_AUTHORIZATION, f"User {number} ({user.name}, {user.role}) is not permitted to use {FC_NAME.get(fc, fc)}.", now, csq)
+    sav.last_result = f"{profile.label} HMAC accepted from user {number} for CSQ {csq}. The held request is executing."
+    _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq} · user {number}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
+    sav.bypass = True
     return process_app(station, bytes((0xC0,)) + pending.critical_apdu, now)
 
 
+def _kcm_mac(method: int, key: bytes, *parts: bytes) -> bytes:
+    sha1 = KEY_CHANGE_METHODS[method][2]
+    return hmac.new(key, b"".join(parts), hashlib.sha1 if sha1 else hashlib.sha256).digest()
+
+
+def _on_user_status_change(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
+    sav = station.sav5
+    if len(body) < 16:
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "Malformed user status change.", now)
+    method, operation, scs = body[0], body[1], _u32(body, 2)
+    role_code, expiry = _u16(body, 6), _u16(body, 8)
+    name_len, pub_len, cert_len = _u16(body, 10), _u16(body, 12), _u16(body, 14)
+    if 16 + name_len + pub_len + cert_len != len(body):
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "User status change lengths do not match the object size.", now, scs)
+    name_raw = body[16 : 16 + name_len]
+    cert = body[16 + name_len + pub_len :]
+    if len(sav.authority_key) not in (16, 32):
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, "No authority key is configured, so remote user management is off.", now, scs)
+    if method not in KEY_CHANGE_METHODS:
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, f"Key change method {method} is not permitted. This outstation accepts symmetric methods 3 and 4.", now, scs)
+    fields = bytearray((operation,))
+    push_u32(fields, scs)
+    push_u16(fields, role_code)
+    push_u16(fields, expiry)
+    push_u16(fields, name_len)
+    if not same_bytes(_kcm_mac(method, sav.authority_key, bytes(fields), name_raw), cert):
+        return _auth_fail(station, seq, 0, ERR_CERTIFICATION, "User status change certification data does not match the authority key.", now, scs)
+    if scs < sav.scs:
+        return _auth_fail(station, seq, 0, ERR_CERTIFICATION, f"Status change sequence {scs} is older than the expected {sav.scs}.", now, scs)
+    sav.scs = (scs + 1) & 0xFFFFFFFF
+    sav.dirty = True
+    name = name_raw.decode("ascii", "replace")
+    role = ROLE_NAMES.get(role_code, f"Role {role_code}")
+    existing = find_user_by_name(sav, name)
+    if operation == 2:
+        if existing is None:
+            return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'User "{name}" does not exist.', now, scs)
+        if existing.number == PROVISIONED_USER:
+            return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, "User 1 is the default user and cannot be deleted remotely.", now, scs)
+        del sav.users[existing.number]
+        sav.status_changes.pop(name, None)
+        sav.last_result = f'User {existing.number} "{name}" deleted by the authority.'
+        _log(station, "note", f"User {existing.number} deleted", name, "", True, now)
+        return [_auth_response(station, seq, b"")]
+    if operation not in (1, 3):
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, f"User status operation {operation} is not defined.", now, scs)
+    if operation == 3 and existing is None:
+        return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'User "{name}" does not exist, so it cannot be changed.', now, scs)
+    sav.status_changes[name] = PendingStatusChange(method, role, expiry, now)
+    sav.last_result = f'User status change for "{name}" as {role} accepted. Waiting for the update key change.'
+    _log(station, "note", f'User status change · "{name}" · {role}', f"SCS {scs}, method {method}.", "", True, now)
+    return [_auth_response(station, seq, b"")]
+
+
 def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
-    if not station.sav5.allow_remote_update:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "Remote update-key change is disabled. Change the update key on this outstation.", now)
-    if auth_profile(station.sav5).version == 2:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "SAv2 does not change the update key on the wire. Change it out of band.", now)
+    sav = station.sav5
     if len(body) < 5:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Malformed update-key change request.", now)
-    method = body[0]
-    name_len, cd_len = _u16(body, 1), _u16(body, 3)
-    if method != UK_METHOD:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, f"Update-key method {method} is not permitted. This outstation accepts method 4.", now)
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "Malformed update key change request.", now)
+    method, name_len, cd_len = body[0], _u16(body, 1), _u16(body, 3)
+    if 5 + name_len + cd_len != len(body) or cd_len < 4:
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "Update key change request lengths do not match the object size.", now)
+    if len(sav.authority_key) not in (16, 32):
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, "No authority key is configured, so the update key cannot change on the wire.", now)
+    if sav.version == 2:
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, "SAv2 does not change the update key on the wire. Change it out of band.", now)
+    if method not in KEY_CHANGE_METHODS:
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, f"Update key change method {method} is not permitted. This outstation accepts symmetric methods 3 and 4.", now)
     name = body[5 : 5 + name_len].decode("ascii", "replace")
-    if name != station.sav5.role:
-        return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'No user named "{name}". The association role is {station.sav5.role}.', now)
+    change = sav.status_changes.get(name)
+    if change is None:
+        return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'No user status change is pending for "{name}".', now)
+    if change.method != method:
+        return _auth_fail(station, seq, 0, ERR_UK_METHOD, f"The status change for \"{name}\" named method {change.method}, not {method}.", now)
+    existing = find_user_by_name(sav, name)
+    number = existing.number if existing else next(n for n in range(1, 65535) if n not in sav.users)
     challenge = random_bytes(UK_CHALLENGE_LEN)
-    station.sav5.update_pending = PendingUpdateKey(station.sav5.os.ksq, station.sav5.user, challenge)
-    _log(station, "note", f"Update-key reply · KSQ {station.sav5.os.ksq}", "g120v12", "", True, now)
+    sav.uk_ksq = (sav.uk_ksq + 1) & 0xFFFFFFFF
+    sav.update_pending = PendingUpdateKey(sav.uk_ksq, number, name, method, body[5 + name_len :], challenge)
+    _log(station, "note", f'Update key change reply · "{name}" · user {number}', "g120v12", "", True, now)
     reply = bytearray()
-    push_u32(reply, station.sav5.os.ksq)
-    push_u16(reply, station.sav5.user)
+    push_u32(reply, sav.uk_ksq)
+    push_u16(reply, number)
     push_u16(reply, len(challenge))
     reply.extend(challenge)
     return [_auth_response(station, seq, _sized(120, 12, bytes(reply)))]
 
 
-def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | None, apdu_in: bytes, now: int) -> list[bytes]:
-    if not station.sav5.allow_remote_update:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "Remote update-key change is disabled. Change the update key on this outstation.", now)
-    pending = station.sav5.update_pending
+def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | None, now: int) -> list[bytes]:
+    sav = station.sav5
+    pending = sav.update_pending
+    sav.update_pending = None
     if len(body) < 8 or pending is None or mac_raw is None:
-        return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Update-key change arrived without a pending reply or a g120v15 confirmation.", now)
-    ksq, user, length = _u32(body, 0), _u16(body, 4), _u16(body, 6)
+        return _auth_fail(station, seq, 0, ERR_UNEXPECTED, "Update key change arrived without a pending g120v12 reply or without g120v15.", now)
+    ksq, number, length = _u32(body, 0), _u16(body, 4), _u16(body, 6)
     encrypted = body[8 : 8 + length]
-    if ksq != pending.ksq or user != pending.user:
-        station.sav5.update_pending = None
-        return _auth_fail(station, seq, user, ERR_UNEXPECTED, "Update-key change sequence or user did not match the reply.", now, ksq)
-    plain = aes256_unwrap(station.sav5.update_key, encrypted)
-    if not plain or len(plain) != UPDATE_KEY_LEN + UK_CHALLENGE_LEN or not same_bytes(plain[UPDATE_KEY_LEN:], pending.outstation_challenge):
-        station.sav5.update_pending = None
+    if ksq != pending.ksq or number != pending.user:
         _stat(station, 16, now)
-        return _auth_fail(station, seq, user, ERR_SIGNATURE, "Update key unwrap failed, or the outstation challenge did not match.", now, ksq)
-    new_key = plain[:UPDATE_KEY_LEN]
-    mac_object_len = 6 + len(mac_raw)
-    signed = apdu_in[: max(0, len(apdu_in) - mac_object_len)]
-    expect = hmac_sha256(new_key, signed, 32)
+        return _auth_fail(station, seq, number, ERR_AUTH_FAILED, "Update key change sequence or user does not match the g120v12 reply.", now, ksq)
+    change = sav.status_changes.get(pending.name)
+    key_len = KEY_CHANGE_METHODS[pending.method][1]
+    name_raw = pending.name.encode("ascii", "replace")
+    plain = aes_unwrap(sav.authority_key, encrypted)
+    ok = (
+        change is not None
+        and plain is not None
+        and len(plain) >= len(name_raw) + key_len + len(pending.outstation_challenge)
+        and plain[: len(name_raw)] == name_raw
+        and same_bytes(plain[len(name_raw) + key_len : len(name_raw) + key_len + len(pending.outstation_challenge)], pending.outstation_challenge)
+    )
+    if not ok or plain is None or change is None:
+        _stat(station, 16, now)
+        return _auth_fail(station, seq, number, ERR_AUTH_FAILED, "The encrypted update key did not decrypt with the authority key, or the user name or challenge did not match.", now, ksq)
+    new_key = plain[len(name_raw) : len(name_raw) + key_len]
+    ids = bytearray()
+    push_u32(ids, ksq)
+    push_u16(ids, number)
+    expect = _kcm_mac(pending.method, new_key, sav.outstation_name.encode("ascii", "replace"), pending.master_challenge, pending.outstation_challenge, bytes(ids))
     if not same_bytes(expect, mac_raw):
-        station.sav5.update_pending = None
         _stat(station, 16, now)
-        return _auth_fail(station, seq, user, ERR_SIGNATURE, "Update-key confirmation HMAC did not match.", now, ksq)
-    station.sav5.update_key = new_key
-    station.sav5.update_pending = None
-    reset_session_keys(station.sav5)
-    station.sav5.os.ksq = (ksq + 1) & 0xFFFFFFFF
-    station.sav5.ok_count += 1
-    station.sav5.last_error = 0
-    station.sav5.last_result = "Update key replaced. Session keys were wiped and must be wrapped again."
+        return _auth_fail(station, seq, number, ERR_SIGNATURE, "The master's update key confirmation MAC did not match.", now, ksq)
+    del sav.status_changes[pending.name]
+    expires = now + change.expiry_days * 86_400_000 if change.expiry_days else 0
+    sav.users[number] = SaUser(number, pending.name, change.role, new_key, expires)
+    sav.dirty = True
+    sav.ok_count += 1
+    sav.last_error = 0
+    sav.last_result = f'User {number} "{pending.name}" ({change.role}) has a new update key. Session keys must be wrapped with it.'
     _stat(station, 15, now)
-    _log(station, "note", "Update key installed", "g120v13 and g120v15 accepted.", "", True, now)
-    i1, i2 = live_iin(station)
-    return [_apdu(seq, FC_RESPONSE, i1, i2, b"", False, False)]
+    _log(station, "note", f'Update key installed · user {number} · "{pending.name}"', f"Method {pending.method}, g120v13 and g120v15 accepted.", "", True, now)
+    confirm = _kcm_mac(pending.method, new_key, name_raw, pending.outstation_challenge, pending.master_challenge, bytes(ids))
+    return [_auth_response(station, seq, _sized(120, 15, confirm))]
 
 
 def _needs_auth(station: Station, apdu: ParsedApdu) -> bool:
-    groups = {obj.group for obj in apdu.objects}
+    groups = {obj.group for obj in apdu.objects if obj.group != 120}
     fc = apdu.fc
     if fc in (FC_CONFIRM, FC_READ, FC_AUTH_REQUEST, 23, 24):
         return False
@@ -1269,98 +1432,78 @@ def _needs_auth(station: Station, apdu: ParsedApdu) -> bool:
     return True
 
 
-def _object_needs_auth(policy, groups: set[int]) -> bool:
-    wants_crob = 12 in groups and policy.crob
-    wants_analog = 41 in groups and policy.analog
-    if 12 in groups or 41 in groups:
-        return wants_crob or wants_analog
-    return policy.crob or policy.analog
-
-
 def _expire_session(station: Station, now: int) -> None:
     sav = station.sav5
-    os = sav.os
-    if os.status != KEY_OK or not os.keys_at:
-        return
-    if now - os.keys_at <= sav.session_lifetime_s * 1000:
-        return
-    reset_session_keys(sav)
-    _stat(station, 4, now)
-    sav.last_result = "Session key lifetime elapsed. Wrap a new pair."
+    for user in sav.users.values():
+        os = user.os
+        if os.status != KEY_OK or not os.keys_at:
+            continue
+        if now - os.keys_at <= sav.session_lifetime_s * 1000:
+            continue
+        reset_user_session(user)
+        _stat(station, 4, now)
+        sav.last_result = f"User {user.number} session key lifetime elapsed. Wrap a new pair."
 
 
-def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes] | None:
+def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int, critical: bool) -> list[bytes] | None:
     _expire_session(station, now)
-    user_no = station.sav5.user
-    if not role_can_control(station.sav5):
-        return _auth_fail(station, apdu.seq, user_no, ERR_AUTHORIZATION, f"{station.sav5.role} is not permitted to perform this function.", now)
+    sav = station.sav5
     aggressive = next((o for o in apdu.objects if o.group == 120 and o.variation == 3), None)
     mac = next((o for o in apdu.objects if o.group == 120 and o.variation == 9), None)
     if aggressive or mac:
-        if not station.sav5.aggressive:
-            return _auth_fail(station, apdu.seq, user_no, ERR_AGGRESSIVE, "Aggressive mode is not enabled on this outstation.", now)
+        if not sav.aggressive:
+            return _auth_fail(station, apdu.seq, 0, ERR_AGGRESSIVE, "Aggressive mode is not enabled on this outstation.", now)
         if not apdu.objects or apdu.objects[0].group != 120 or apdu.objects[0].variation != 3:
-            return _auth_fail(station, apdu.seq, user_no, ERR_UNEXPECTED, "Aggressive mode requires g120v3 as the first object.", now)
+            return _auth_fail(station, apdu.seq, 0, ERR_UNEXPECTED, "Aggressive mode requires g120v3 as the first object.", now)
         return _check_aggressive(station, apdu, user, aggressive, mac, now)
-    os = station.sav5.os
-    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len:
-        return _auth_fail(station, apdu.seq, user_no, ERR_AUTH_FAILED, "Session keys are not valid. Send a key status request and a key change before this control.", now)
-    profile = auth_profile(station.sav5)
-    csq = os.csq & 0xFFFFFFFF
-    os.csq = (csq + 1) & 0xFFFFFFFF
+    if not critical:
+        return None
+    profile = auth_profile(sav)
+    if not any(u.os.status == KEY_OK and not u.expired(now) for u in sav.users.values()):
+        return _auth_fail(station, apdu.seq, 0, ERR_AUTH_FAILED, "No user has valid session keys. Send a key status request and a key change before this request.", now)
+    csq = sav.csq & 0xFFFFFFFF
+    sav.csq = (csq + 1) & 0xFFFFFFFF
     data = random_bytes(profile.challenge_len)
     body = bytearray()
     push_u32(body, csq)
-    push_u16(body, user_no)
+    push_u16(body, 0)
     push_u8(body, profile.mal)
     push_u8(body, 1)
     body.extend(data)
     challenge = _auth_response(station, apdu.seq, _sized(120, 1, bytes(body)))
-    os.challenge_apdu = challenge
-    station.sav5.pending = PendingAuth(apdu.seq, csq, user_no, challenge, user[1:], now + station.sav5.challenge_timeout_ms)
-    station.sav5.challenges_sent += 1
+    sav.last_challenge = challenge
+    sav.pending = PendingAuth(apdu.seq, csq, challenge, user[1:], now + sav.challenge_timeout_ms)
+    sav.challenges_sent += 1
     _stat(station, 8, now)
-    _log(station, "note", f"Challenged {FC_NAME.get(apdu.fc, apdu.fc)} · CSQ {csq} · user {user_no}", "g120v1, reason CRITICAL.", "", True, now)
+    _log(station, "note", f"Challenged {FC_NAME.get(apdu.fc, apdu.fc)} · CSQ {csq}", "g120v1, reason CRITICAL. Any user with session keys may reply.", "", True, now)
     return [challenge]
 
 
 def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressive: ParsedObject | None, mac_obj: ParsedObject | None, now: int) -> list[bytes] | None:
     _stat(station, 8, now)
-    user_no = station.sav5.user
+    sav = station.sav5
     raw = aggressive.items[0].raw if aggressive and aggressive.items else b""
     mac = mac_obj.items[0].raw if mac_obj and mac_obj.items else b""
     if len(raw) < 6 or not mac:
-        return _auth_fail(station, apdu.seq, user_no, ERR_UNEXPECTED, "Aggressive mode needs both g120v3 and g120v9.", now)
-    csq, who = _u32(raw, 0), _u16(raw, 4)
-    os = station.sav5.os
-    if who != station.sav5.user:
-        return _auth_fail(station, apdu.seq, who, ERR_UNKNOWN_USER, f"Aggressive mode user {who} is not the association user.", now, csq)
-    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len or not os.challenge_apdu:
-        return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive mode needs a prior challenge and valid session keys.", now, csq)
-    if csq != (os.csq & 0xFFFFFFFF):
-        return _auth_fail(station, apdu.seq, who, ERR_UNEXPECTED, f"Aggressive CSQ {csq} was not one greater than the last challenge.", now, csq)
+        return _auth_fail(station, apdu.seq, 0, ERR_UNEXPECTED, "Aggressive mode needs both g120v3 and g120v9.", now)
+    csq, number = _u32(raw, 0), _u16(raw, 4)
+    who = _live_user(station, number, now)
+    if who is None:
+        return _auth_fail(station, apdu.seq, number, ERR_UNKNOWN_USER, f"Aggressive mode user {number} has no update key on this outstation.", now, csq)
+    if who.os.status != KEY_OK or not auth_profile(sav, who).session_key_ok(who.os.control_key) or not sav.last_challenge:
+        return _auth_fail(station, apdu.seq, number, ERR_AUTH_FAILED, "Aggressive mode needs a prior challenge and valid session keys for this user.", now, csq)
+    if csq != (sav.csq & 0xFFFFFFFF):
+        return _auth_fail(station, apdu.seq, number, ERR_UNEXPECTED, f"Aggressive CSQ {csq} is not {sav.csq}, one more than the last challenge.", now, csq)
     if not apdu.objects or apdu.objects[-1].group != 120 or apdu.objects[-1].variation != 9:
-        return _auth_fail(station, apdu.seq, who, ERR_UNEXPECTED, "The MAC object was not at the end of the fragment.", now, csq)
+        return _auth_fail(station, apdu.seq, number, ERR_UNEXPECTED, "The MAC object was not at the end of the fragment.", now, csq)
     signed = user[1 : apdu.objects[-1].offset]
-    expect = _mac(station, os.control_key, os.challenge_apdu + signed)
-    if not same_bytes(expect, mac):
-        return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive-mode HMAC mismatch. The control was not executed.", now, csq)
-    os.accepted_csq = csq
-    os.csq = (csq + 1) & 0xFFFFFFFF
-    station.sav5.ok_count += 1
-    station.sav5.last_error = 0
-    station.sav5.last_result = f"Aggressive mode accepted at CSQ {csq}."
-    station.sav5.challenges_rx += 1
-    station.sav5.last_user = who
-    station.sav5.last_auth_time = now
-    _stat(station, 12, now)
-    station.sav5.error_burst = 0
-    os.auth_count += 1
-    if os.auth_count >= station.sav5.max_auth_messages:
-        os.status = KEY_AUTH_FAIL
-        os.control_key = b""
-        os.monitor_key = b""
-        os.last_status_mac = b""
-        station.sav5.last_result = "Session key change count reached. Wrap a new pair."
-    _log(station, "note", f"Aggressive mode accepted · CSQ {csq}", "g120v3 plus g120v9.", "", True, now)
+    expect = _mac(station, who.os.control_key, sav.last_challenge + signed)
+    if len(mac) != len(expect) or not same_bytes(expect, mac):
+        return _auth_fail(station, apdu.seq, number, ERR_AUTH_FAILED, "Aggressive-mode HMAC mismatch. The request was not executed.", now, csq)
+    sav.csq = (csq + 1) & 0xFFFFFFFF
+    _count_auth(station, who, now)
+    if _needs_auth(station, apdu) and not _authorize(station, who, apdu.fc):
+        return _auth_fail(station, apdu.seq, number, ERR_AUTHORIZATION, f"User {number} ({who.name}, {who.role}) is not permitted to use {FC_NAME.get(apdu.fc, apdu.fc)}.", now, csq)
+    sav.last_result = f"Aggressive mode accepted from user {number} at CSQ {csq}."
+    _log(station, "note", f"Aggressive mode accepted · CSQ {csq} · user {number}", "g120v3 plus g120v9.", "", True, now)
     return None

@@ -79,6 +79,8 @@ SIZES = {
     (50, 1): 6,
     (52, 1): 2,
     (52, 2): 2,
+    (120, 3): 6,
+    (120, 4): 2,
     (121, 1): 7,
     (122, 1): 7,
     (122, 2): 13,
@@ -342,7 +344,7 @@ def parse_apdu(user: bytes) -> ParsedApdu:
     iin1 = iin2 = 0
     if has_iin:
         if len(user) < 5:
-            return ParsedApdu(False, "Response missing IIN", fc=fc, transport_fir=bool(th & 0x80), transport_fin=bool(th & 0x40), transport_seq=th & 0x3F)
+            return ParsedApdu(False, "Response missing IIN", fc=fc, transport_fir=bool(th & 0x40), transport_fin=bool(th & 0x80), transport_seq=th & 0x3F)
         iin1, iin2 = user[3], user[4]
         cursor = 5
     expects = fc in DATA_FUNCTIONS
@@ -357,8 +359,8 @@ def parse_apdu(user: bytes) -> ParsedApdu:
             con=bool(ac & 0x20),
             uns=bool(ac & 0x10),
             seq=ac & 0x0F,
-            transport_fir=bool(th & 0x80),
-            transport_fin=bool(th & 0x40),
+            transport_fir=bool(th & 0x40),
+            transport_fin=bool(th & 0x80),
             transport_seq=th & 0x3F,
             fc=fc,
             iin1=iin1,
@@ -481,7 +483,13 @@ def describe_frame(data: bytes) -> tuple[str, str, bool]:
         return f"CRC FAIL · {fname}", to_hex(data), False
     if not link.user:
         return f"{fname}  DST {link.dest}  SRC {link.src}", to_hex(data), link.ok
-    apdu = parse_apdu(link.user)
+    summary, _detail, ok = describe_user(link.user)
+    return summary, to_hex(data), link.ok and link.crc_ok and ok
+
+
+def describe_user(user: bytes) -> tuple[str, str, bool]:
+    """Summarise a transport segment carrying a whole application fragment."""
+    apdu = parse_apdu(user)
     fc_name = FC_NAME.get(apdu.fc, f"FC_{apdu.fc}")
     titles = []
     for obj in apdu.objects:
@@ -496,4 +504,4 @@ def describe_frame(data: bytes) -> tuple[str, str, bool]:
     core = " · ".join(titles[:4])
     iin = f"  IIN {iin_short(apdu.iin1, apdu.iin2)}" if apdu.has_iin else ""
     summary = f"{fc_name}{(' · ' + core) if core else ''}{iin}"
-    return summary, to_hex(data), link.ok and link.crc_ok and apdu.ok
+    return summary, to_hex(user), apdu.ok
