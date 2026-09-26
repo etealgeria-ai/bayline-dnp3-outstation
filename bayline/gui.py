@@ -443,11 +443,14 @@ def _build_security(parent: tk.Frame, host) -> dict:
         ("select_operate", "Select before operate"),
         ("cold_restart", "Cold restart"),
         ("warm_restart", "Warm restart"),
+        ("unsolicited", "Enable / disable unsolicited"),
+        ("assign_class", "Assign class"),
+        ("initialize", "Initialize data and application"),
         ("time_write", "Time write"),
         ("file_transfer", "File transfer"),
     )
     for name, label in boxes:
-        variable = tk.BooleanVar(value=name not in ("time_write", "file_transfer"))
+        variable = tk.BooleanVar(value=name != "time_write")
         policy_vars[name] = variable
         check(policy, label, variable, lambda n=name, v=variable: host.set_policy(n, v.get()))
 

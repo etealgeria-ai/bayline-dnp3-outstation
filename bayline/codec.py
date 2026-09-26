@@ -305,6 +305,8 @@ class ParsedObject:
     stop: int = 0
     indexes: list[int] = field(default_factory=list)
     items: list[ParsedItem] = field(default_factory=list)
+    offset: int = 0
+    end: int = 0
 
 
 @dataclass
@@ -363,12 +365,13 @@ def parse_apdu(user: bytes) -> ParsedApdu:
         )
 
     while cursor < len(user):
+        origin = cursor
         if cursor + 3 > len(user):
             return finish(False, "Truncated object header")
         group, variation, qualifier = user[cursor], user[cursor + 1], user[cursor + 2]
         cursor += 3
         prefix, rng = (qualifier >> 4) & 0x0F, qualifier & 0x0F
-        obj = ParsedObject(group, variation, qualifier, all=rng == 6)
+        obj = ParsedObject(group, variation, qualifier, all=rng == 6, offset=origin)
         count = 0
         indexed = False
         if rng in (0, 1, 2):
@@ -405,6 +408,7 @@ def parse_apdu(user: bytes) -> ParsedApdu:
         if count > 1024:
             return finish(False, "Range too large")
         if not expects or count == 0 or variation == 0 or group == 60:
+            obj.end = cursor
             objects.append(obj)
             continue
         if rng == 11 and prefix == 5:
@@ -417,6 +421,7 @@ def parse_apdu(user: bytes) -> ParsedApdu:
                     return finish(False, "Truncated sized object body")
                 obj.items.append(ParsedItem(None, user[cursor : cursor + sz]))
                 cursor += sz
+            obj.end = cursor
             objects.append(obj)
             continue
         if is_packed(group, variation):
@@ -425,6 +430,7 @@ def parse_apdu(user: bytes) -> ParsedApdu:
                 return finish(False, "Truncated packed bit field")
             obj.items.append(ParsedItem(obj.start, user[cursor : cursor + nbytes]))
             cursor += nbytes
+            obj.end = cursor
             objects.append(obj)
             continue
         size = object_size(group, variation)
@@ -445,6 +451,7 @@ def parse_apdu(user: bytes) -> ParsedApdu:
                 return finish(False, "Truncated object body")
             obj.items.append(ParsedItem(index, user[cursor : cursor + size]))
             cursor += size
+        obj.end = cursor
         objects.append(obj)
     return finish(True)
 

@@ -21,9 +21,12 @@ KEY_NOT_INIT = 2
 KEY_AUTH_FAIL = 4
 ERR_AUTH_FAILED = 1
 ERR_UNEXPECTED = 2
-ERR_UNKNOWN_USER = 11
+ERR_AUTHORIZATION = 5
 ERR_UK_METHOD = 8
 ERR_SIGNATURE = 9
+ERR_UNKNOWN_USER = 11
+ERR_KEY_STATUS_LIMIT = 12
+MAX_KEY_STATUS_REQUESTS = 2
 CRITICAL = {3, 4, 5, 6, 7, 8, 9, 10, 13, 14}
 
 
@@ -89,6 +92,7 @@ class OsSession:
     last_status_mac: bytes = b""
     challenge_apdu: bytes = b""
     keys_at: int = 0
+    key_status_count: int = 0
 
 
 @dataclass
@@ -118,8 +122,11 @@ class AuthPolicy:
     select_operate: bool = True
     cold_restart: bool = True
     warm_restart: bool = True
+    unsolicited: bool = True
+    assign_class: bool = True
+    initialize: bool = True
     time_write: bool = False
-    file_transfer: bool = False
+    file_transfer: bool = True
 
 
 ROLES = {
@@ -150,6 +157,7 @@ class Sav5:
     policy: AuthPolicy = field(default_factory=AuthPolicy)
     challenge_timeout_ms: int = 5000
     session_lifetime_s: int = 3600
+    max_key_status_requests: int = MAX_KEY_STATUS_REQUESTS
     ok_count: int = 0
     fail_count: int = 0
     challenges_sent: int = 0
