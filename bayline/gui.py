@@ -73,6 +73,15 @@ def run_gui(host) -> None:
     for index, title in ((0, "52-T1"), (1, "52-F1"), (2, "52-F2")):
         tk.Button(point_actions, text=f"Trip {title}", command=lambda i=index: _breaker(host, i, 0), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
         tk.Button(point_actions, text=f"Close {title}", command=lambda i=index: _breaker(host, i, 1), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 12))
+    manual = tk.Frame(points_tab, bg=BG)
+    manual.pack(fill="x", padx=8, pady=(0, 8))
+    tk.Label(manual, text="Manual value", bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(side="left")
+    manual_entry = tk.Entry(manual, width=16, bg=SURFACE, fg=INK, insertbackground=INK, relief="flat", font=("Consolas", 11))
+    manual_entry.pack(side="left", padx=8)
+    manual_error = tk.StringVar()
+    tk.Button(manual, text="Write", command=lambda: _write(host, points, manual_entry, manual_error), bg=AMBER, fg="#1a140c", relief="flat", padx=12, pady=6).pack(side="left")
+    tk.Button(manual, text="Release to random", command=lambda: _release(host, points), bg=SURFACE, fg=INK, relief="flat", padx=12, pady=6).pack(side="left", padx=(8, 0))
+    tk.Label(manual, textvariable=manual_error, bg=BG, fg=ALARM, font=("Segoe UI", 10)).pack(side="left", padx=8)
 
     comms = _text(comms_tab)
     security = _text(security_tab)
@@ -164,8 +173,10 @@ def run_gui(host) -> None:
         ])
         selected = points.selection()
         points.delete(*points.get_children())
-        for kind, index, name, value, units in snap["points"]:
+        for kind, index, name, value, units, held in snap["points"]:
             shown_value = "CLOSED" if value >= 0.5 else "OPEN" if kind in ("bi", "bo") else f"{value:.2f} {units}".strip()
+            if held:
+                shown_value += "  held"
             points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), index, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
@@ -234,6 +245,29 @@ def _verdict(snap: dict) -> tuple[str, str]:
     if snap["quiet"] is not None and snap["quiet"] > 15000:
         return "Idle", f"Listening on port {snap['port']}. Nothing has been received for {round(snap['quiet'] / 1000)} seconds."
     return "Waiting", f"Listening on port {snap['port']}, address {snap['outstation']}. No TCP master is connected."
+
+
+def _selected(points: ttk.Treeview) -> tuple[str, int] | None:
+    pick = points.selection()
+    if not pick or "-" not in pick[0]:
+        return None
+    kind, index = pick[0].split("-", 1)
+    return kind, int(index)
+
+
+def _write(host, points: ttk.Treeview, entry: tk.Entry, error: tk.StringVar) -> None:
+    chosen = _selected(points)
+    if chosen is None:
+        error.set("Select a point.")
+        return
+    message = host.write_manual(chosen[0], chosen[1], entry.get())
+    error.set(message or "Held. Simulation will not change it.")
+
+
+def _release(host, points: ttk.Treeview) -> None:
+    chosen = _selected(points)
+    if chosen:
+        host.release_point(chosen[0], chosen[1])
 
 
 def _toggle(host) -> None:

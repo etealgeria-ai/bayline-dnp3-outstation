@@ -40,15 +40,16 @@ def simulate(station: Station, now: int, dt_sec: float) -> None:
     for load_index, counter_index in ((7, 0), (8, 1)):
         load = find_point(station, "ai", load_index)
         counter = find_point(station, "ctr", counter_index)
-        if load and counter:
+        if load and counter and not counter.manual:
             write_point(station, counter, counter.value + (load.value * dt * station.energy_scale) / 3600, counter.flags, now, "sim")
 
 
 def _ease(station: Station, index: int, target: float, jitter: float, now: int) -> None:
     point = find_point(station, "ai", index)
-    if not point:
+    if not point or point.manual:
         return
-    nxt = point.value + (target - point.value) * 0.38 + (random.random() - 0.5) * jitter
+    span = max(jitter * 8, abs(target) * 0.012)
+    nxt = point.value + (target - point.value) * 0.16 + (random.random() - 0.5) * span
     write_point(station, point, nxt, point.flags, now, "sim")
 
 

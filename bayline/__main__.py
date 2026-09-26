@@ -8,9 +8,9 @@ import threading
 import time
 
 from bayline.codec import frame_size
-from bayline.outstation import flush_unsolicited, handle_frame, housekeep
+from bayline.outstation import flush_unsolicited, handle_frame, housekeep, write_point
 from bayline.sim import simulate
-from bayline.station import LogItem, create_station
+from bayline.station import LogItem, create_station, find_point
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 20000
@@ -148,9 +148,30 @@ class Host:
                     "result": sav.last_result,
                     "key": sav.update_key.hex(),
                 },
-                "points": [(p.kind, p.index, p.name, p.value, p.units) for p in station.points],
+                "points": [(p.kind, p.index, p.name, p.value, p.units, p.manual) for p in station.points],
                 "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
             }
+
+    def write_manual(self, kind: str, index: int, text: str) -> str | None:
+        try:
+            value = float(text.strip())
+        except ValueError:
+            return "Enter a number."
+        with self.lock:
+            point = find_point(self.station, kind, index)
+            if point is None:
+                return "Select a point first."
+            if point.kind in ("bi", "bo"):
+                value = 1 if value >= 0.5 else 0
+            write_point(self.station, point, value, point.flags, int(time.time() * 1000), "control")
+            point.manual = True
+        return None
+
+    def release_point(self, kind: str, index: int) -> None:
+        with self.lock:
+            point = find_point(self.station, kind, index)
+            if point:
+                point.manual = False
 
     def set_flag(self, name: str, value: bool) -> None:
         with self.lock:

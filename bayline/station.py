@@ -44,6 +44,7 @@ class Point:
     feedback: int | None = None
     op_counter: int | None = None
     frozen: float | None = None
+    manual: bool = False
 
 
 @dataclass
