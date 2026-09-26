@@ -93,6 +93,7 @@ class OsSession:
     challenge_apdu: bytes = b""
     keys_at: int = 0
     key_status_count: int = 0
+    last_key_status: bytes = b""
 
 
 @dataclass
@@ -237,6 +238,8 @@ class Station:
     scenario_since: int = 0
     fault_stage: int = 0
     sav5: Sav5 = field(default_factory=Sav5)
+    security: list[int] = field(default_factory=lambda: [0] * 18)
+    security_sent: list[int] = field(default_factory=lambda: [0] * 18)
 
 
 def _flags(kind: str, closed: bool) -> int:
@@ -289,7 +292,10 @@ def create_station() -> Station:
         _point("ao", 0, "Feeder 1 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
         _point("ao", 1, "Feeder 2 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
     ]
-    return Station(points=rows)
+    station = Station(points=rows)
+    station.security[17] = 1
+    station.security_sent[17] = 1
+    return station
 
 
 def find_point(station: Station, kind: str, index: int) -> Point | None:

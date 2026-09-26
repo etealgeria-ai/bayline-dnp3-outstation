@@ -61,16 +61,29 @@ def session(station) -> None:
     body = g120(apdu, 5)
     check(body is not None and len(body) >= 13, "g120v5 missing")
     assert body is not None
-    challenge = body[11 : 11 + (body[9] | (body[10] << 8))]
+    ksq = int.from_bytes(body[:4], "little")
+    user = int.from_bytes(body[4:6], "little")
+    check(ksq == 1, f"first transmitted KSQ is {ksq}, IEEE 1815 requires 1")
+    status_data = body
     control = bytes(range(32))
     monitor = bytes(range(32, 64))
-    wrapped = aes256_wrap(station.sav5.update_key, control + monitor + challenge)
+    plain = (32).to_bytes(2, "little") + control + monitor + status_data
+    plain += bytes((-len(plain)) % 8)
+    wrapped = aes256_wrap(station.sav5.update_key, plain)
     change = bytearray((0xC1, FC_AUTH_REQUEST, 120, 6, 0x5B, 1, (6 + len(wrapped)) & 0xFF, 0))
-    change.extend((0, 0, 0, 0, 1, 0))
+    change.extend(ksq.to_bytes(4, "little"))
+    change.extend(user.to_bytes(2, "little"))
     change.extend(wrapped)
     reply = exchange(station, master(4, 100, bytes(change)))
     check(station.sav5.os.status == KEY_OK, f"session {station.sav5.os.status} {station.sav5.last_result}")
     check(len(reply) == 1, "no key-change response")
+    _, changed = app_of(reply[0])
+    after = g120(changed, 5)
+    check(after is not None and int.from_bytes(after[:4], "little") == 2, "KSQ did not increment after the session key change")
+    stats = exchange(station, master(4, 100, bytes((0xC2, FC_READ, 121, 1, 6))))
+    _, stat_apdu = app_of(stats[0])
+    check(any(obj.group == 121 and obj.variation == 1 for obj in stat_apdu.objects), "g121v1 missing")
+    check(station.security[13] >= 1, "session key change statistic was not counted")
 
 
 def reply_to(station, challenge_frame: bytes, critical: bytes) -> None:

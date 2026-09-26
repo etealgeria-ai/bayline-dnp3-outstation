@@ -100,6 +100,22 @@ class Built:
         self.extra2 = 0
 
 
+def _stat(station: Station, index: int, now: int, step: int = 1) -> None:
+    if not 0 <= index < len(station.security) or step <= 0:
+        return
+    station.security[index] = (station.security[index] + step) & 0xFFFFFFFF
+    if station.security[index] - station.security_sent[index] < 1:
+        return
+    station.security_sent[index] = station.security[index]
+    station.events.append(
+        DnpEvent(station.next_event_id, "sec", index, float(station.security[index]), 0x01, outstation_now(station, now), 3, 2)
+    )
+    station.next_event_id += 1
+    while len(station.events) > station.event_max:
+        station.events.pop(0)
+        station.overflow = True
+
+
 def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
     housekeep(station, now)
     summary, detail, ok = describe_frame(data)
@@ -151,9 +167,14 @@ def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
         station.expect_fcb = not station.expect_fcb
         if not broadcast:
             outs.append(_secondary(station, reply_to, 0, now))
+    _stat(station, 8, now)
+    produced = 0
     for apdu in process_app(station, link.user, now):
         if not broadcast:
             outs.append(_primary(station, reply_to, apdu, now))
+            produced += 1
+    if produced:
+        _stat(station, 6, now, produced)
     return outs
 
 
@@ -285,6 +306,7 @@ def housekeep(station: Station, now: int) -> None:
     if station.sav5.pending and now > station.sav5.pending.deadline:
         station.sav5.pending = None
         station.sav5.last_result = "Challenge expired before a reply."
+        _stat(station, 3, now)
         _log(station, "note", "SAv5 challenge expired", "The critical request was not executed.", "", True, now)
 
 
@@ -334,6 +356,7 @@ def _read_objects(station: Station, apdu: ParsedApdu, now: int) -> Built:
                 _add_events(station, built, [e for e in station.events if not e.held and e.clazz == obj.variation - 1], 0, now)
             elif obj.variation == 1:
                 _add_all_static(station, built, now)
+                _add_security(station, built)
             else:
                 unknown = True
         elif obj.group == 0:
@@ -353,6 +376,13 @@ def _read_objects(station: Station, apdu: ParsedApdu, now: int) -> Built:
             listed = [e for e in station.events if not e.held and _event_group(e.kind) == obj.group]
             filtered = listed if obj.all else [e for e in listed if e.index in obj.indexes]
             _add_events(station, built, filtered, obj.variation, now)
+        elif obj.group == 121:
+            _add_security(station, built, None if obj.all else obj.indexes)
+        elif obj.group == 122:
+            listed = [event for event in station.events if not event.held and event.kind == "sec"]
+            if not obj.all:
+                listed = [event for event in listed if event.index in obj.indexes]
+            _add_events(station, built, listed, obj.variation or 2, now)
         else:
             kind = _kind_for_group(obj.group)
             if not kind or obj.group in (12, 41):
@@ -621,6 +651,9 @@ def _add_counters(station: Station, built: Built, points: list[Point], requested
 def _add_events(station: Station, built: Built, events: list[DnpEvent], requested: int, now: int) -> None:
     buckets: dict[tuple[int, int], list[DnpEvent]] = {}
     for event in events:
+        if event.kind == "sec":
+            buckets.setdefault((122, requested or 2), []).append(event)
+            continue
         variation = requested or event.variation
         buckets.setdefault((_event_group(event.kind), variation), []).append(event)
     for (group, variation), listed in buckets.items():
@@ -652,6 +685,13 @@ def _encode_static(point: Point, variation: int, now: int) -> bytes | None:
 
 
 def _encode_event(event: DnpEvent, variation: int) -> bytes | None:
+    if event.kind == "sec":
+        out = bytearray((0x01,))
+        push_u16(out, 0)
+        push_u32(out, int(event.value) & 0xFFFFFFFF)
+        if variation != 1:
+            push_time48(out, event.time)
+        return bytes(out)
     if event.kind in ("bi", "bo"):
         if variation == 1:
             return bytes((event.flags & 0xFF,))
@@ -860,7 +900,29 @@ def _static_group(kind: str) -> int:
 
 
 def _event_group(kind: str) -> int:
+    if kind == "sec":
+        return 122
     return {"bi": 2, "bo": 11, "ctr": 22, "ai": 32, "ao": 42}[kind]
+
+
+def _add_security(station: Station, built: Built, indexes: list[int] | None = None) -> None:
+    chosen = list(range(len(station.security))) if indexes is None else [i for i in indexes if 0 <= i < len(station.security)]
+    if not chosen:
+        return
+    body = bytearray()
+    for index in chosen:
+        body.append(0x01)
+        push_u16(body, 0)
+        push_u32(body, station.security[index] & 0xFFFFFFFF)
+    if chosen == list(range(chosen[0], chosen[-1] + 1)):
+        _append(built, bytes((121, 1, 0x00, chosen[0] & 0xFF, chosen[-1] & 0xFF)) + body)
+        return
+    items = []
+    offset = 0
+    for index in chosen:
+        items.append((index, bytes(body[offset : offset + 7])))
+        offset += 7
+    _append(built, _header_indexed(121, 1, items))
 
 
 def _unsol_class(station: Station, clazz: int) -> bool:
@@ -919,6 +981,13 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
     station.sav5.fail_count += 1
     station.sav5.last_error = code
     station.sav5.last_result = text
+    _stat(station, 10, now)
+    if code == ERR_AUTHORIZATION:
+        _stat(station, 1, now)
+    elif code == ERR_AUTH_FAILED:
+        _stat(station, 2, now)
+    elif code == ERR_UNEXPECTED:
+        _stat(station, 0, now)
     _log(station, "note", f"{auth_profile(station.sav5).label} {ERR_NAME.get(code, 'error')}", text, "", False, now)
     body = bytearray()
     push_u32(body, seq_field)
@@ -933,18 +1002,17 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
 def _key_status(station: Station, user: int) -> bytes:
     profile = auth_profile(station.sav5)
     os = station.sav5.os
-    mal = profile.mal if os.status == KEY_OK and len(os.last_status_mac) == profile.mac_len else 0
-    mac = os.last_status_mac if mal else b""
-    body = bytearray()
-    push_u32(body, os.ksq)
-    push_u16(body, user)
-    push_u8(body, profile.kwa)
-    push_u8(body, os.status)
-    push_u8(body, mal)
-    push_u16(body, len(os.key_challenge))
-    body.extend(os.key_challenge)
-    body.extend(mac)
-    return _sized(120, 5, bytes(body))
+    data = bytearray()
+    push_u32(data, os.ksq)
+    push_u16(data, user)
+    push_u8(data, profile.kwa)
+    push_u8(data, os.status)
+    push_u8(data, profile.mal if os.status == KEY_OK and len(os.last_status_mac) == profile.mac_len else 0)
+    push_u16(data, len(os.key_challenge))
+    data.extend(os.key_challenge)
+    os.last_key_status = bytes(data)
+    mac = os.last_status_mac if data[8] else b""
+    return _sized(120, 5, bytes(data) + mac)
 
 
 def _auth_request(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes]:
@@ -980,6 +1048,7 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         os.monitor_key = b""
         os.last_status_mac = b""
         return _auth_fail(station, seq, user, ERR_KEY_STATUS_LIMIT, "Too many key status requests without a session key change.", now)
+    os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     profile = auth_profile(station.sav5)
     os.last_status_mac = _mac(station, os.monitor_key, apdu_in) if os.status == KEY_OK and len(os.monitor_key) == profile.key_len else b""
     os.key_challenge = random_bytes(profile.challenge_len)
@@ -997,11 +1066,17 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     profile = auth_profile(station.sav5)
     plain = aes_unwrap(update_key_material(station.sav5), wrapped)
     unwrapped = None
-    if plain and len(plain) == profile.key_len * 2 + profile.challenge_len:
-        unwrapped = (plain[: profile.key_len], plain[profile.key_len : profile.key_len * 2], plain[profile.key_len * 2 :])
-    seq_ok = ksq == os.ksq
-    challenge_ok = unwrapped is not None and same_bytes(unwrapped[2], os.key_challenge)
-    if unwrapped is None or not challenge_ok or not seq_ok:
+    status_ok = False
+    if plain and len(plain) >= 2 + profile.key_len * 2:
+        key_len = plain[0] | (plain[1] << 8)
+        control = plain[2 : 2 + key_len]
+        monitor = plain[2 + key_len : 2 + key_len * 2]
+        echoed = plain[2 + key_len * 2 :]
+        status_ok = key_len == profile.key_len and echoed.startswith(os.last_key_status) and not any(echoed[len(os.last_key_status) :])
+        if status_ok:
+            unwrapped = (control, monitor)
+    seq_ok = len(os.last_key_status) >= 4 and ksq == _u32(os.last_key_status, 0)
+    if unwrapped is None or not status_ok or not seq_ok:
         os.status = KEY_AUTH_FAIL
         os.control_key = b""
         os.monitor_key = b""
@@ -1010,7 +1085,10 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         station.sav5.pending = None
         station.sav5.fail_count += 1
         station.sav5.last_error = ERR_AUTH_FAILED
-        station.sav5.last_result = f"{profile.wrap_name} unwrap failed. The update key does not match, so the session stays at AUTH_FAIL." if seq_ok else f"Key change sequence {ksq} did not match KSQ {os.ksq}."
+        station.sav5.last_result = f"{profile.wrap_name} unwrap failed. The wrapped key status does not match the last g120v5." if seq_ok else f"Key change sequence {ksq} does not match the last transmitted KSQ."
+        _stat(station, 14, now)
+        _stat(station, 2, now)
+        os.ksq = (os.ksq + 1) & 0xFFFFFFFF
         _log(station, "note", "Session key change rejected · AUTH_FAIL", station.sav5.last_result, "", False, now)
         return [_auth_response(station, seq, _key_status(station, user))]
     os.control_key, os.monitor_key = unwrapped[0], unwrapped[1]
@@ -1020,6 +1098,7 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     os.key_challenge = random_bytes(profile.challenge_len)
     station.sav5.pending = None
     station.sav5.key_changes += 1
+    _stat(station, 13, now)
     os.keys_at = now
     os.key_status_count = 0
     station.sav5.ok_count += 1
@@ -1059,6 +1138,7 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
     station.sav5.challenges_rx += 1
     station.sav5.last_user = user
     station.sav5.last_auth_time = now
+    _stat(station, 12, now)
     _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
     station.sav5.bypass = True
     station.sav5.os.accepted_csq = csq
@@ -1115,6 +1195,7 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
     station.sav5.last_result = "Update key replaced. Session keys were wiped and must be wrapped again."
+    _stat(station, 15, now)
     _log(station, "note", "Update key installed", "g120v13 and g120v15 accepted.", "", True, now)
     i1, i2 = live_iin(station)
     return [_apdu(seq, FC_RESPONSE, i1, i2, b"", False, False)]
@@ -1169,6 +1250,7 @@ def _expire_session(station: Station, now: int) -> None:
 
 
 def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes] | None:
+    _stat(station, 7, now)
     _expire_session(station, now)
     user_no = station.sav5.user
     if not role_can_control(station.sav5):
@@ -1226,5 +1308,6 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     station.sav5.challenges_rx += 1
     station.sav5.last_user = who
     station.sav5.last_auth_time = now
+    _stat(station, 12, now)
     _log(station, "note", f"Aggressive mode accepted · CSQ {csq}", "g120v3 plus g120v9.", "", True, now)
     return None
