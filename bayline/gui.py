@@ -20,7 +20,7 @@ ALARM = "#e15b4a"
 
 def run_gui(host) -> None:
     root = tk.Tk()
-    root.title("Bayline DNP3 outstation")
+    root.title("DNP3 Outstation Simulator")
     root.geometry("1080x720")
     root.minsize(860, 560)
     root.configure(bg=BG)
@@ -39,7 +39,7 @@ def run_gui(host) -> None:
     header = tk.Frame(root, bg=BG)
     header.pack(fill="x", padx=16, pady=(12, 4))
     tk.Label(header, text="BAYLINE", bg=BG, fg=AMBER, font=("Segoe UI", 9)).pack(anchor="w")
-    tk.Label(header, text="DNP3 outstation", bg=BG, fg=INK, font=("Segoe UI", 18)).pack(anchor="w")
+    tk.Label(header, text="DNP3 Outstation Simulator", bg=BG, fg=INK, font=("Segoe UI", 18)).pack(anchor="w")
     subtitle = tk.StringVar()
     tk.Label(header, textvariable=subtitle, bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(anchor="w")
     lamps = tk.Frame(header, bg=BG)
