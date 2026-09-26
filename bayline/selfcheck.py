@@ -80,6 +80,23 @@ def session(station) -> None:
     _, changed = app_of(reply[0])
     after = g120(changed, 5)
     check(after is not None and int.from_bytes(after[:4], "little") == 2, "KSQ did not increment after the session key change")
+    again = exchange(station, master(4, 100, bytes((0xC3, FC_AUTH_REQUEST, 120, 4, 0x5B, 1, 2, 0, 1, 0))))
+    _, active = app_of(again[0])
+    current = g120(active, 5)
+    check(current is not None and current[8] != 0, "an active session omitted the key-status MAC")
+    assert current is not None
+    expect = hmac_sha256(monitor, bytes(change), 16)
+    check(current.endswith(expect), "key-status MAC was not calculated over the last key change")
+    fresh = (32).to_bytes(2, "little") + control + monitor + current
+    fresh += bytes([0xA5]) * ((-len(fresh)) % 8)
+    wrapped_again = aes256_wrap(station.sav5.update_key, fresh)
+    follow = bytearray((0xC4, FC_AUTH_REQUEST, 120, 6, 0x5B, 1, (6 + len(wrapped_again)) & 0xFF, 0))
+    follow.extend(int.from_bytes(current[:4], "little").to_bytes(4, "little"))
+    follow.extend(int.from_bytes(current[4:6], "little").to_bytes(2, "little"))
+    follow.extend(wrapped_again)
+    second = exchange(station, master(4, 100, bytes(follow)))
+    check(station.sav5.os.status == KEY_OK, f"rekey while the session was OK failed: {station.sav5.last_result}")
+    check(len(second) == 1, "no response to the second key change")
     stats = exchange(station, master(4, 100, bytes((0xC2, FC_READ, 121, 1, 6))))
     _, stat_apdu = app_of(stats[0])
     check(any(obj.group == 121 and obj.variation == 1 for obj in stat_apdu.objects), "g121v1 missing")
@@ -158,6 +175,13 @@ def run() -> None:
     authed(station, operate(1, 0x81))
     feeder = find_point(station, "bi", 1)
     check(feeder is not None and feeder.value < 0.5, "feeder breaker did not open")
+    kept = [event.id for event in station.events if event.kind == "bi"]
+    check(kept, "the breaker event was not queued")
+    for _ in range(100):
+        exchange(station, master(4, 100, bytes((0xC0, FC_READ, 1, 2, 6))))
+    still = [event.id for event in station.events if event.kind == "bi"]
+    check(any(item in still for item in kept), "statistic events pushed the breaker event out of the buffer")
+    check(not station.overflow, "routine reads overflowed the event buffer")
     for _ in range(3):
         again = exchange(station, master(4, 100, bytes((0xC3, FC_AUTH_REQUEST, 120, 4, 0x5B, 1, 2, 0, 1, 0))))
         check(len(again) == 1, "key status stopped after repeated requests")

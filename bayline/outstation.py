@@ -101,11 +101,15 @@ class Built:
         self.extra2 = 0
 
 
+STAT_THRESHOLD = (2, 2, 2, 2, 2, 100, 100, 100, 100, 10, 2, 10, 100, 2, 2, 2, 2, 2)
+
+
 def _stat(station: Station, index: int, now: int, step: int = 1) -> None:
     if not 0 <= index < len(station.security) or step <= 0:
         return
     station.security[index] = (station.security[index] + step) & 0xFFFFFFFF
-    if station.security[index] - station.security_sent[index] < 1:
+    threshold = STAT_THRESHOLD[index]
+    if station.security[index] - station.security_sent[index] < threshold:
         return
     station.security_sent[index] = station.security[index]
     station.events.append(
@@ -123,14 +127,17 @@ def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
     _log(station, "in", summary, detail, to_hex(data), ok, now)
     link = decode_frame(data)
     if not link.ok or not link.crc_ok:
+        _stat(station, 9, now)
         _log(station, "note", "CRC failure — frame discarded" if not link.crc_ok else (link.error or "Frame rejected"), link.error, "", False, now)
         return []
     reply_to = link.src
     broadcast = link.dest == 0xFFFF
     if not broadcast and link.dest != station.outstation:
+        _stat(station, 9, now)
         _log(station, "note", f"Ignored frame for address {link.dest}", f"This outstation is {station.outstation}.", "", True, now)
         return []
     if link.src != station.master:
+        _stat(station, 9, now)
         _log(station, "note", f"Ignored frame from address {link.src}", f"The configured master address is {station.master}.", "", True, now)
         return []
     if (link.control & 0x40) == 0:
@@ -171,14 +178,14 @@ def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
         station.expect_fcb = not station.expect_fcb
         if not broadcast:
             outs.append(_secondary(station, reply_to, 0, now))
-    _stat(station, 8, now)
+    _stat(station, 6, now)
     produced = 0
     for apdu in process_app(station, link.user, now):
         if not broadcast:
             outs.append(_primary(station, reply_to, apdu, now))
             produced += 1
     if produced:
-        _stat(station, 6, now, produced)
+        _stat(station, 5, now, produced)
     return outs
 
 
@@ -312,6 +319,7 @@ def housekeep(station: Station, now: int) -> None:
         station.sav5.last_result = "Challenge expired before a reply."
         _stat(station, 3, now)
         _log(station, "note", "SAv5 challenge expired", "The critical request was not executed.", "", True, now)
+    _expire_session(station, now)
 
 
 def live_iin(station: Station, extra1: int = 0, extra2: int = 0) -> tuple[int, int]:
@@ -1007,6 +1015,13 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
     return [_auth_response(station, seq, _sized(120, 7, bytes(body)))]
 
 
+def _status_echo_ok(echoed: bytes, status: bytes, mac: bytes) -> bool:
+    if status and echoed.startswith(status):
+        return True
+    full = status + mac
+    return bool(full) and echoed.startswith(full)
+
+
 def _key_status(station: Station, user: int) -> bytes:
     profile = auth_profile(station.sav5)
     os = station.sav5.os
@@ -1048,6 +1063,7 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     user = _u16(body, 0) if len(body) >= 2 else 0
     if user != station.sav5.user:
         return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. The association user is {station.sav5.user} ({station.sav5.role}).", now)
+    _expire_session(station, now)
     os = station.sav5.os
     if os.status == KEY_OK and os.key_status_count >= station.sav5.max_key_status_requests:
         os.status = KEY_AUTH_FAIL
@@ -1055,12 +1071,16 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         os.monitor_key = b""
         os.last_status_mac = b""
         os.key_status_count = 0
+        _stat(station, 4, now)
         station.sav5.last_result = "Session keys cleared after the key-status limit. The next key status lets the master rekey."
         _log(station, "note", "Key-status limit · session keys cleared", station.sav5.last_result, "", False, now)
     os.key_status_count += 1
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     profile = auth_profile(station.sav5)
-    os.last_status_mac = _mac(station, os.monitor_key, apdu_in) if os.status == KEY_OK and len(os.monitor_key) == profile.key_len else b""
+    if os.status == KEY_OK and os.last_key_change and len(os.monitor_key) == profile.key_len:
+        os.last_status_mac = _mac(station, os.monitor_key, os.last_key_change)
+    else:
+        os.last_status_mac = b""
     os.key_challenge = random_bytes(profile.challenge_len)
     _log(station, "note", f"Key status KSQ {os.ksq}", "g120v5", "", True, now)
     return [_auth_response(station, seq, _key_status(station, user))]
@@ -1082,7 +1102,7 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         control = plain[2 : 2 + key_len]
         monitor = plain[2 + key_len : 2 + key_len * 2]
         echoed = plain[2 + key_len * 2 :]
-        status_ok = key_len == profile.key_len and echoed.startswith(os.last_key_status) and not any(echoed[len(os.last_key_status) :])
+        status_ok = key_len == profile.key_len and _status_echo_ok(echoed, os.last_key_status, os.last_status_mac)
         if status_ok:
             unwrapped = (control, monitor)
     seq_ok = len(os.last_key_status) >= 4 and ksq == _u32(os.last_key_status, 0)
@@ -1097,11 +1117,13 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
         station.sav5.last_error = ERR_AUTH_FAILED
         station.sav5.last_result = f"{profile.wrap_name} unwrap failed. The wrapped key status does not match the last g120v5." if seq_ok else f"Key change sequence {ksq} does not match the last transmitted KSQ."
         _stat(station, 14, now)
+        _stat(station, 4, now)
         _stat(station, 2, now)
         os.ksq = (os.ksq + 1) & 0xFFFFFFFF
         _log(station, "note", "Session key change rejected · AUTH_FAIL", station.sav5.last_result, "", False, now)
         return [_auth_response(station, seq, _key_status(station, user))]
     os.control_key, os.monitor_key = unwrapped[0], unwrapped[1]
+    os.last_key_change = apdu_in
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     os.status = KEY_OK
     os.last_status_mac = _mac(station, os.monitor_key, apdu_in)
@@ -1204,6 +1226,7 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
     plain = aes256_unwrap(station.sav5.update_key, encrypted)
     if not plain or len(plain) != UPDATE_KEY_LEN + UK_CHALLENGE_LEN or not same_bytes(plain[UPDATE_KEY_LEN:], pending.outstation_challenge):
         station.sav5.update_pending = None
+        _stat(station, 16, now)
         return _auth_fail(station, seq, user, ERR_SIGNATURE, "Update key unwrap failed, or the outstation challenge did not match.", now, ksq)
     new_key = plain[:UPDATE_KEY_LEN]
     mac_object_len = 6 + len(mac_raw)
@@ -1211,6 +1234,7 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
     expect = hmac_sha256(new_key, signed, 32)
     if not same_bytes(expect, mac_raw):
         station.sav5.update_pending = None
+        _stat(station, 16, now)
         return _auth_fail(station, seq, user, ERR_SIGNATURE, "Update-key confirmation HMAC did not match.", now, ksq)
     station.sav5.update_key = new_key
     station.sav5.update_pending = None
@@ -1251,11 +1275,11 @@ def _expire_session(station: Station, now: int) -> None:
     if now - os.keys_at <= sav.session_lifetime_s * 1000:
         return
     reset_session_keys(sav)
+    _stat(station, 4, now)
     sav.last_result = "Session key lifetime elapsed. Wrap a new pair."
 
 
 def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes] | None:
-    _stat(station, 7, now)
     _expire_session(station, now)
     user_no = station.sav5.user
     if not role_can_control(station.sav5):
@@ -1285,11 +1309,13 @@ def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) ->
     os.challenge_apdu = challenge
     station.sav5.pending = PendingAuth(apdu.seq, csq, user_no, challenge, user[1:], now + station.sav5.challenge_timeout_ms)
     station.sav5.challenges_sent += 1
+    _stat(station, 8, now)
     _log(station, "note", f"Challenged {FC_NAME.get(apdu.fc, apdu.fc)} · CSQ {csq} · user {user_no}", "g120v1, reason CRITICAL.", "", True, now)
     return [challenge]
 
 
 def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressive: ParsedObject | None, mac_obj: ParsedObject | None, now: int) -> list[bytes] | None:
+    _stat(station, 8, now)
     user_no = station.sav5.user
     raw = aggressive.items[0].raw if aggressive and aggressive.items else b""
     mac = mac_obj.items[0].raw if mac_obj and mac_obj.items else b""

@@ -16,6 +16,43 @@ from bayline.station import ROLES, LogItem, auth_profile, create_station, find_p
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 20000
+DEFAULT_KEY_FILE = "bayline-update-key.hex"
+
+
+def load_update_key(text: str = "", path: str = "") -> tuple[bytes, str]:
+    target = path or os.environ.get("BAYLINE_UPDATE_KEY_FILE") or DEFAULT_KEY_FILE
+    chosen = text or os.environ.get("BAYLINE_UPDATE_KEY", "")
+    parsed = hex_to_bytes(chosen, 32) if chosen else None
+    if parsed:
+        try:
+            with open(target, "w", encoding="ascii") as handle:
+                handle.write(parsed.hex() + "\n")
+        except OSError:
+            pass
+        return parsed, target
+    try:
+        stored = hex_to_bytes(open(target, encoding="ascii").read(), 32)
+    except OSError:
+        stored = None
+    if stored:
+        return stored, target
+    key = os.urandom(32)
+    try:
+        with open(target, "w", encoding="ascii") as handle:
+            handle.write(key.hex() + "\n")
+    except OSError:
+        target = ""
+    return key, target
+
+
+def _save_key(path: str, key: bytes) -> None:
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(key.hex() + "\n")
+    except OSError:
+        pass
 
 
 def _take(buf: bytearray) -> list[bytes]:
@@ -46,9 +83,13 @@ def _take(buf: bytearray) -> list[bytes]:
 class Host:
     """Outstation plus the TCP listener. Safe to start and stop from the window."""
 
-    def __init__(self, port: int = DEFAULT_PORT) -> None:
+    def __init__(self, port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "") -> None:
         self.port = port
+        self.host = host or HOST
         self.station = create_station()
+        key, path = load_update_key(update_key, key_file)
+        self.station.sav5.update_key = key
+        self.key_file = path
         self.lock = threading.Lock()
         self.clients: list[socket.socket] = []
         self.running = False
@@ -56,7 +97,7 @@ class Host:
         self._server: socket.socket | None = None
         self._ticking = False
         self._accept_thread: threading.Thread | None = None
-        self.allow_ips: set[str] = set()
+        self.allow_ips: set[str] = set(allow_ips or [])
 
     def start(self) -> None:
         if self.running:
@@ -65,7 +106,7 @@ class Host:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            server.bind((HOST, self.port))
+            server.bind((self.host, self.port))
             server.listen(8)
             server.settimeout(0.4)
         except OSError as exc:
@@ -74,13 +115,16 @@ class Host:
             return
         self._server = server
         self.running = True
-        self._note(f"Outstation started on port {self.port}")
+        self._note(f"Outstation started on {self.host}:{self.port}")
+        where = self.key_file or "not saved"
+        print(f"Update key file {where}", flush=True)
+        print(f"Update key {self.station.sav5.update_key.hex()}", flush=True)
         if not self._ticking:
             self._ticking = True
             threading.Thread(target=self._tick, daemon=True).start()
         self._accept_thread = threading.Thread(target=self._accept, daemon=True)
         self._accept_thread.start()
-        print(f"Bayline DNP3 outstation listening on {HOST}:{self.port}  address {self.station.outstation}  SAv5 user 1", flush=True)
+        print(f"Bayline DNP3 outstation listening on {self.host}:{self.port}  address {self.station.outstation}  SAv5 user 1", flush=True)
 
     def stop(self) -> None:
         if not self.running and self._server is None:
@@ -243,6 +287,7 @@ class Host:
             self.station.sav5.update_key = key
             reset_session_keys(self.station.sav5)
             self.station.sav5.last_result = "Update key imported. Session keys were cleared."
+        _save_key(self.key_file, key)
         return None
 
     def generate_update_key(self) -> str:
@@ -251,6 +296,7 @@ class Host:
             self.station.sav5.update_key = key
             reset_session_keys(self.station.sav5)
             self.station.sav5.last_result = "A new update key was generated. Load the same key in the master."
+        _save_key(self.key_file, key)
         return key.hex()
 
     def set_auth_version(self, version: int) -> None:
@@ -366,29 +412,33 @@ class Host:
             print(f"master disconnected {peer}", flush=True)
 
 
-def serve(port: int = DEFAULT_PORT) -> None:
-    host = Host(port)
-    host.start()
-    if host.error:
-        raise SystemExit(host.error)
+def serve(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "") -> None:
+    listener = Host(port, host, allow_ips, update_key, key_file)
+    listener.start()
+    if listener.error:
+        raise SystemExit(listener.error)
     try:
-        while host.running:
+        while listener.running:
             time.sleep(0.4)
     except KeyboardInterrupt:
-        host.stop()
+        listener.stop()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bayline DNP3/TCP outstation")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=HOST, help="Bind address. Use 0.0.0.0 so a master on the LAN can connect.")
+    parser.add_argument("--allow-ip", action="append", default=[], help="Accept this client IP. Repeat for more than one. Omit to accept any IP.")
+    parser.add_argument("--update-key", default="", help="32-octet update key as hex. Also read from BAYLINE_UPDATE_KEY.")
+    parser.add_argument("--update-key-file", default="", help="File that stores the update key. Defaults to bayline-update-key.hex.")
     parser.add_argument("--headless", action="store_true", help="Listen without opening the window")
     args = parser.parse_args()
     if args.headless:
-        serve(args.port)
+        serve(args.port, args.host, args.allow_ip, args.update_key, args.update_key_file)
         return
     from bayline.gui import run_gui
 
-    run_gui(Host(args.port))
+    run_gui(Host(args.port, args.host, args.allow_ip, args.update_key, args.update_key_file))
 
 
 if __name__ == "__main__":

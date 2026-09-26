@@ -96,6 +96,7 @@ class OsSession:
     key_status_count: int = 0
     auth_count: int = 0
     last_key_status: bytes = b""
+    last_key_change: bytes = b""
 
 
 @dataclass
