@@ -1,4 +1,4 @@
-# Bayline DNP3 outstation
+# Bayline DNP3 outstation Simulator
 
 Python DNP3 outstation only. No built-in master. Listens on TCP port 20000 for your master.
 
