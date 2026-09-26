@@ -63,8 +63,8 @@ def run_gui(host) -> None:
     wire_tab = _tab(book, "Wire")
     security_tab = _tab(book, "Security")
 
-    points = ttk.Treeview(points_tab, columns=("kind", "idx", "name", "value"), show="headings")
-    for key, title, width in (("kind", "Type", 60), ("idx", "Index", 70), ("name", "Point", 320), ("value", "Value", 140)):
+    points = ttk.Treeview(points_tab, columns=("kind", "addr", "idx", "name", "value"), show="headings")
+    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 address", 120), ("idx", "Index", 70), ("name", "Point", 280), ("value", "Value", 160)):
         points.heading(key, text=title)
         points.column(key, width=width, anchor="w")
     points.pack(fill="both", expand=True, padx=8, pady=8)
@@ -190,7 +190,8 @@ def run_gui(host) -> None:
             shown_value = "CLOSED" if value >= 0.5 else "OPEN" if kind in ("bi", "bo") else f"{value:.2f} {units}".strip()
             if held:
                 shown_value += "  held"
-            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), index, name, shown_value))
+            address = f"{_group(kind)}:{index}"
+            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
         key = tuple((item[0], item[2], item[3]) for item in snap["log"])
@@ -258,6 +259,10 @@ def _verdict(snap: dict) -> tuple[str, str]:
     if snap["quiet"] is not None and snap["quiet"] > 15000:
         return "Idle", f"Listening on port {snap['port']}. Nothing has been received for {round(snap['quiet'] / 1000)} seconds."
     return "Waiting", f"Listening on port {snap['port']}, address {snap['outstation']}. No TCP master is connected."
+
+
+def _group(kind: str) -> int:
+    return {"bi": 1, "bo": 10, "ctr": 20, "ai": 30, "ao": 40}.get(kind, 0)
 
 
 def _selected(points: ttk.Treeview) -> tuple[str, int] | None:
