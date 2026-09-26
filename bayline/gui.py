@@ -64,8 +64,8 @@ def run_gui(host) -> None:
     wire_tab = _tab(book, "Wire")
     security_tab = _tab(book, "Security")
 
-    points = ttk.Treeview(points_tab, columns=("kind", "addr", "idx", "name", "value"), show="headings")
-    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 address", 120), ("idx", "Index", 70), ("name", "Point", 280), ("value", "Value", 160)):
+    points = ttk.Treeview(points_tab, columns=("kind", "addr", "idx", "clazz", "name", "value"), show="headings")
+    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 address", 110), ("idx", "Index", 60), ("clazz", "Class", 60), ("name", "Point", 260), ("value", "Value", 160)):
         points.heading(key, text=title)
         points.column(key, width=width, anchor="w")
     points.pack(fill="both", expand=True, padx=8, pady=8)
@@ -162,10 +162,10 @@ def run_gui(host) -> None:
         _draw_trend(trend, samples)
         selected = points.selection()
         points.delete(*points.get_children())
-        for kind, index, name, value, units, held in snap["points"]:
+        for kind, index, name, value, units, held, clazz in snap["points"]:
             shown_value = _shown(kind, index, value, units, held)
             address = f"{_group(kind)}:{index}"
-            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, name, shown_value))
+            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, clazz, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
         key = tuple((item[0], item[2], item[3]) for item in snap["log"])
@@ -236,7 +236,7 @@ def _verdict(snap: dict) -> tuple[str, str]:
 
 
 def _sample(rows: list[dict], snap: dict) -> None:
-    values = {(kind, index): value for kind, index, _name, value, _units, _held in snap["points"]}
+    values = {(kind, index): value for kind, index, _name, value, _units, _held, _clazz in snap["points"]}
     rows.append(values)
     if len(rows) > 120:
         del rows[:-120]

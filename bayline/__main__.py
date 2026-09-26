@@ -175,7 +175,7 @@ class Host:
                     "result": sav.last_result,
                     "key": update_key_material(sav).hex(),
                 },
-                "points": [(p.kind, p.index, p.name, p.value, p.units, p.manual) for p in station.points],
+                "points": [(p.kind, p.index, p.name, p.value, p.units, p.manual, p.clazz) for p in station.points],
                 "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
             }
 
