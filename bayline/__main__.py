@@ -184,10 +184,19 @@ class Host:
         with self.lock:
             sav = self.station.sav5
             sav.version = version
+            sav.enabled = True
             reset_session_keys(sav)
             label = auth_profile(sav).label
             sav.last_result = f"{label} selected. Session keys were cleared. The master must wrap a new pair."
         self._note(f"{label} selected")
+
+    def disable_auth(self) -> None:
+        with self.lock:
+            sav = self.station.sav5
+            sav.enabled = False
+            sav.pending = None
+            sav.last_result = "Secure authentication is off. SAv2 and SAv5 are both disabled. Controls go out in the clear."
+        self._note("Authentication disabled")
 
     def set_flag(self, name: str, value: bool) -> None:
         with self.lock:

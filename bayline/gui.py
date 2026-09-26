@@ -101,9 +101,12 @@ def run_gui(host) -> None:
 
     security_actions = tk.Frame(security_tab, bg=BG)
     security_actions.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-    tk.Button(security_actions, text="Use SAv2", command=lambda: host.set_auth_version(2), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
-    tk.Button(security_actions, text="Use SAv5", command=lambda: host.set_auth_version(5), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
-    tk.Button(security_actions, text="SAv on/off", command=lambda: host.set_flag("sav5", not host.snapshot()["sav"]["enabled"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    sav2 = tk.Button(security_actions, text="SAv2", command=lambda: host.set_auth_version(2), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
+    sav5 = tk.Button(security_actions, text="SAv5", command=lambda: host.set_auth_version(5), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
+    sav_off = tk.Button(security_actions, text="Disable SAv", command=host.disable_auth, bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
+    sav2.pack(side="left", padx=(0, 6))
+    sav5.pack(side="left", padx=(0, 6))
+    sav_off.pack(side="left", padx=(0, 6))
     tk.Button(security_actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
     tk.Button(security_actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left")
 
@@ -115,7 +118,10 @@ def run_gui(host) -> None:
         subtitle.set(f"{snap['name']} · address {snap['outstation']} · master {snap['master']} · port {snap['port']}")
         power.configure(text="Stop outstation" if snap["running"] else "Start outstation", bg=ALARM if snap["running"] else AMBER, fg="#1a100e")
         _lamp(lamp_widgets["TCP"], lamp_vars["TCP"], f"TCP {snap['clients']}" if snap["clients"] else f"TCP {snap['port']}", snap["running"] and not snap["error"], bool(snap["error"]))
-        _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], sav["label"] if sav["status"] == KEY_OK else f"{sav['label']} fail" if sav["status"] == KEY_AUTH_FAIL else f"{sav['label']} init", sav["enabled"] and sav["status"] == KEY_OK, sav["status"] == KEY_AUTH_FAIL)
+        choice = "off" if not sav["enabled"] else "2" if sav["version"] == 2 else "5"
+        for key, button in (("2", sav2), ("5", sav5), ("off", sav_off)):
+            button.configure(bg=AMBER if key == choice else SURFACE, fg="#1a140c" if key == choice else INK)
+        _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], "SAv off" if not sav["enabled"] else sav["label"] if sav["status"] == KEY_OK else f"{sav['label']} fail" if sav["status"] == KEY_AUTH_FAIL else f"{sav['label']} init", sav["enabled"] and sav["status"] == KEY_OK, sav["enabled"] and sav["status"] == KEY_AUTH_FAIL)
         _lamp(lamp_widgets["Restart"], lamp_vars["Restart"], "Restart", snap["restart"], snap["restart"])
         _lamp(lamp_widgets["Time"], lamp_vars["Time"], "Time", snap["need_time"], snap["need_time"])
         _lamp(lamp_widgets["Local"], lamp_vars["Local"], "Local", snap["local"], snap["local"])
