@@ -56,6 +56,7 @@ class Host:
         self._server: socket.socket | None = None
         self._ticking = False
         self._accept_thread: threading.Thread | None = None
+        self.allow_ips: set[str] = set()
 
     def start(self) -> None:
         if self.running:
@@ -224,6 +225,8 @@ class Host:
     def set_policy(self, name: str, value: bool) -> None:
         with self.lock:
             if hasattr(self.station.sav5.policy, name):
+                if name != "time_write":
+                    value = True
                 setattr(self.station.sav5.policy, name, value)
 
     def set_auth_limits(self, challenge_ms: int, lifetime_s: int) -> None:
@@ -326,6 +329,10 @@ class Host:
             except OSError:
                 break
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if self.allow_ips and addr[0] not in self.allow_ips:
+                sock.close()
+                self._note(f"Rejected {addr[0]} — not in the allow list")
+                continue
             self.clients.append(sock)
             peer = f"{addr[0]}:{addr[1]}"
             self._note(f"Master connected {peer}")

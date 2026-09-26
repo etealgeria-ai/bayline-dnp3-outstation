@@ -56,6 +56,7 @@ from bayline.crypto import (
     session_mac,
 )
 from bayline.station import (
+    ERR_AGGRESSIVE,
     ERR_AUTH_FAILED,
     ERR_AUTHORIZATION,
     ERR_KEY_STATUS_LIMIT,
@@ -89,7 +90,7 @@ from bayline.station import (
 )
 
 FRAGMENT = 230
-ERR_NAME = {1: "authentication failed", 2: "unexpected response", 5: "authorization failed", 8: "update-key method not permitted", 9: "invalid signature", 11: "unknown user", 12: "too many key status requests"}
+ERR_NAME = {1: "authentication failed", 2: "unexpected response", 4: "aggressive mode not supported", 7: "authorization failed", 8: "update-key method not permitted", 9: "invalid signature", 11: "unknown user", 12: "too many key status requests"}
 
 
 class Built:
@@ -124,11 +125,14 @@ def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
     if not link.ok or not link.crc_ok:
         _log(station, "note", "CRC failure — frame discarded" if not link.crc_ok else (link.error or "Frame rejected"), link.error, "", False, now)
         return []
+    reply_to = link.src
     broadcast = link.dest == 0xFFFF
     if not broadcast and link.dest != station.outstation:
         _log(station, "note", f"Ignored frame for address {link.dest}", f"This outstation is {station.outstation}.", "", True, now)
         return []
-    reply_to = link.src
+    if link.src != station.master:
+        _log(station, "note", f"Ignored frame from address {link.src}", f"The configured master address is {station.master}.", "", True, now)
+        return []
     if (link.control & 0x40) == 0:
         _log(station, "note", "Secondary frame ignored", "Outstations do not accept link responses.", "", True, now)
         return []
@@ -981,6 +985,10 @@ def _auth_fail(station: Station, seq: int, user: int, code: int, text: str, now:
     station.sav5.fail_count += 1
     station.sav5.last_error = code
     station.sav5.last_result = text
+    station.sav5.error_burst += 1
+    if station.sav5.error_burst > station.sav5.max_error_messages:
+        _log(station, "note", "Authentication error suppressed", text, "", False, now)
+        return []
     _stat(station, 10, now)
     if code == ERR_AUTHORIZATION:
         _stat(station, 1, now)
@@ -1041,13 +1049,15 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     if user != station.sav5.user:
         return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. The association user is {station.sav5.user} ({station.sav5.role}).", now)
     os = station.sav5.os
-    os.key_status_count += 1
-    if os.key_status_count > station.sav5.max_key_status_requests:
+    if os.status == KEY_OK and os.key_status_count >= station.sav5.max_key_status_requests:
         os.status = KEY_AUTH_FAIL
         os.control_key = b""
         os.monitor_key = b""
         os.last_status_mac = b""
-        return _auth_fail(station, seq, user, ERR_KEY_STATUS_LIMIT, "Too many key status requests without a session key change.", now)
+        os.key_status_count = 0
+        station.sav5.last_result = "Session keys cleared after the key-status limit. The next key status lets the master rekey."
+        _log(station, "note", "Key-status limit · session keys cleared", station.sav5.last_result, "", False, now)
+    os.key_status_count += 1
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     profile = auth_profile(station.sav5)
     os.last_status_mac = _mac(station, os.monitor_key, apdu_in) if os.status == KEY_OK and len(os.monitor_key) == profile.key_len else b""
@@ -1101,6 +1111,8 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     _stat(station, 13, now)
     os.keys_at = now
     os.key_status_count = 0
+    os.auth_count = 0
+    station.sav5.error_burst = 0
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
     station.sav5.last_result = f"Session keys installed. KSQ {os.ksq}."
@@ -1139,6 +1151,14 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
     station.sav5.last_user = user
     station.sav5.last_auth_time = now
     _stat(station, 12, now)
+    station.sav5.error_burst = 0
+    station.sav5.os.auth_count += 1
+    if station.sav5.os.auth_count >= station.sav5.max_auth_messages:
+        station.sav5.os.status = KEY_AUTH_FAIL
+        station.sav5.os.control_key = b""
+        station.sav5.os.monitor_key = b""
+        station.sav5.os.last_status_mac = b""
+        station.sav5.last_result = "Session key change count reached. Wrap a new pair."
     _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
     station.sav5.bypass = True
     station.sav5.os.accepted_csq = csq
@@ -1146,6 +1166,8 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
 
 
 def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
+    if not station.sav5.allow_remote_update:
+        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "Remote update-key change is disabled. Change the update key on this outstation.", now)
     if auth_profile(station.sav5).version == 2:
         return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "SAv2 does not change the update key on the wire. Change it out of band.", now)
     if len(body) < 5:
@@ -1169,6 +1191,8 @@ def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> lis
 
 
 def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | None, apdu_in: bytes, now: int) -> list[bytes]:
+    if not station.sav5.allow_remote_update:
+        return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, "Remote update-key change is disabled. Change the update key on this outstation.", now)
     pending = station.sav5.update_pending
     if len(body) < 8 or pending is None or mac_raw is None:
         return _auth_fail(station, seq, station.sav5.user, ERR_UNEXPECTED, "Update-key change arrived without a pending reply or a g120v15 confirmation.", now)
@@ -1202,32 +1226,13 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
 
 
 def _needs_auth(station: Station, apdu: ParsedApdu) -> bool:
-    policy = station.sav5.policy
     groups = {obj.group for obj in apdu.objects}
     fc = apdu.fc
-    if fc in (FC_SELECT, FC_OPERATE):
-        return policy.controls and policy.select_operate and _object_needs_auth(policy, groups)
-    if fc == FC_DIRECT_OPERATE:
-        return policy.controls and policy.direct_operate and _object_needs_auth(policy, groups)
-    if fc == FC_DIRECT_OPERATE_NR:
-        return policy.controls and policy.direct_operate_nr and _object_needs_auth(policy, groups)
-    if fc in (FC_IMMED_FREEZE, FC_IMMED_FREEZE_NR, FC_FREEZE_CLEAR, FC_FREEZE_CLEAR_NR):
-        return policy.controls
-    if fc == FC_COLD_RESTART:
-        return policy.cold_restart
-    if fc == FC_WARM_RESTART:
-        return policy.warm_restart
-    if fc == FC_WRITE and policy.time_write and 50 in groups:
-        return True
-    if fc in (25, 26, 27, 28, 29, 30) and policy.file_transfer:
-        return True
-    if fc in (FC_ENABLE_UNSOL, FC_DISABLE_UNSOL):
-        return policy.unsolicited
-    if fc == 22:
-        return policy.assign_class
-    if fc in (15, 16, 17, 18, 19):
-        return policy.initialize
-    return False
+    if fc in (FC_CONFIRM, FC_READ, FC_AUTH_REQUEST, 23, 24):
+        return False
+    if fc == FC_WRITE and groups <= {50}:
+        return station.sav5.policy.time_write
+    return True
 
 
 def _object_needs_auth(policy, groups: set[int]) -> bool:
@@ -1258,6 +1263,10 @@ def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) ->
     aggressive = next((o for o in apdu.objects if o.group == 120 and o.variation == 3), None)
     mac = next((o for o in apdu.objects if o.group == 120 and o.variation == 9), None)
     if aggressive or mac:
+        if not station.sav5.aggressive:
+            return _auth_fail(station, apdu.seq, user_no, ERR_AGGRESSIVE, "Aggressive mode is not enabled on this outstation.", now)
+        if not apdu.objects or apdu.objects[0].group != 120 or apdu.objects[0].variation != 3:
+            return _auth_fail(station, apdu.seq, user_no, ERR_UNEXPECTED, "Aggressive mode requires g120v3 as the first object.", now)
         return _check_aggressive(station, apdu, user, aggressive, mac, now)
     os = station.sav5.os
     if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len:
@@ -1309,5 +1318,13 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     station.sav5.last_user = who
     station.sav5.last_auth_time = now
     _stat(station, 12, now)
+    station.sav5.error_burst = 0
+    os.auth_count += 1
+    if os.auth_count >= station.sav5.max_auth_messages:
+        os.status = KEY_AUTH_FAIL
+        os.control_key = b""
+        os.monitor_key = b""
+        os.last_status_mac = b""
+        station.sav5.last_result = "Session key change count reached. Wrap a new pair."
     _log(station, "note", f"Aggressive mode accepted · CSQ {csq}", "g120v3 plus g120v9.", "", True, now)
     return None

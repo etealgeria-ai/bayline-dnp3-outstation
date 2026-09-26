@@ -147,15 +147,22 @@ def run() -> None:
     groups = {obj.group for obj in apdu.objects}
     check(1 in groups and 30 in groups, f"integrity groups {groups}")
 
-    clear = bytes((0xC0, FC_WRITE, 80, 1, 0x00, 7, 7, 0x01))
-    exchange(station, master(4, 100, clear))
-    check(not station.restart, "restart bit still set")
+    stranger = exchange(station, master(4, 77, bytes((0xC0, FC_READ, 60, 1, 6))))
+    check(stranger == [], "a frame from a master address other than 100 was accepted")
 
     session(station)
+    authed(station, bytes((0xC0, FC_WRITE, 80, 1, 0x00, 7, 7, 0x01)))
+    check(not station.restart, "restart bit still set")
+
     authed(station, crob(1, 0x81))
     authed(station, operate(1, 0x81))
     feeder = find_point(station, "bi", 1)
     check(feeder is not None and feeder.value < 0.5, "feeder breaker did not open")
+    for _ in range(3):
+        again = exchange(station, master(4, 100, bytes((0xC3, FC_AUTH_REQUEST, 120, 4, 0x5B, 1, 2, 0, 1, 0))))
+        check(len(again) == 1, "key status stopped after repeated requests")
+        _, status_apdu = app_of(again[0])
+        check(g120(status_apdu, 5) is not None, "repeated key status did not return g120v5")
 
     server = threading.Thread(target=serve, kwargs={"port": 20011}, daemon=True)
     server.start()

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
-from bayline.crypto import CHALLENGE_LEN, MAC_LEN, SESSION_KEY_LEN, UPDATE_KEY_LEN, hex_to_bytes
+from bayline.crypto import CHALLENGE_LEN, MAC_LEN, SESSION_KEY_LEN, UPDATE_KEY_LEN
 
 BI_ONLINE = 0x01
 BI_STATE = 0x80
 AI_ONLINE = 0x01
 CTR_ONLINE = 0x01
 RESTART_FLAG = 0x02
-DEFAULT_UPDATE_KEY_HEX = "b4711e5a09c3d8f64e2a77b0c15d93a8e60f4c2b8d7195a3f6e0c4b7d2a81935"
 PROVISIONED_USER = 1
 MAL = 4
 KWA = 2
@@ -21,7 +21,8 @@ KEY_NOT_INIT = 2
 KEY_AUTH_FAIL = 4
 ERR_AUTH_FAILED = 1
 ERR_UNEXPECTED = 2
-ERR_AUTHORIZATION = 5
+ERR_AGGRESSIVE = 4
+ERR_AUTHORIZATION = 7
 ERR_UK_METHOD = 8
 ERR_SIGNATURE = 9
 ERR_UNKNOWN_USER = 11
@@ -93,6 +94,7 @@ class OsSession:
     challenge_apdu: bytes = b""
     keys_at: int = 0
     key_status_count: int = 0
+    auth_count: int = 0
     last_key_status: bytes = b""
 
 
@@ -150,7 +152,7 @@ class Sav5:
     aggressive: bool = False
     role: str = "Operator"
     user: int = PROVISIONED_USER
-    update_key: bytes = field(default_factory=lambda: hex_to_bytes(DEFAULT_UPDATE_KEY_HEX, UPDATE_KEY_LEN) or b"")
+    update_key: bytes = field(default_factory=lambda: os.urandom(UPDATE_KEY_LEN))
     os: OsSession = field(default_factory=OsSession)
     pending: PendingAuth | None = None
     update_pending: PendingUpdateKey | None = None
@@ -159,6 +161,10 @@ class Sav5:
     challenge_timeout_ms: int = 5000
     session_lifetime_s: int = 3600
     max_key_status_requests: int = MAX_KEY_STATUS_REQUESTS
+    max_auth_messages: int = 1000
+    max_error_messages: int = 5
+    error_burst: int = 0
+    allow_remote_update: bool = False
     ok_count: int = 0
     fail_count: int = 0
     challenges_sent: int = 0

@@ -338,8 +338,10 @@ def _build_security(parent: tk.Frame, host) -> dict:
         tk.Label(line, text=label, bg=BG, fg=MUTED, width=28, anchor="w", font=("Segoe UI", 10)).pack(side="left")
         widget.pack(side="left", fill="x", expand=True)
 
-    def check(body: tk.Frame, label: str, variable: tk.BooleanVar, command) -> None:
-        tk.Checkbutton(body, text=label, variable=variable, command=command, bg=BG, fg=INK, selectcolor=SURFACE, activebackground=BG, activeforeground=INK, anchor="w").pack(fill="x", pady=1)
+    def check(body: tk.Frame, label: str, variable: tk.BooleanVar, command) -> tk.Checkbutton:
+        box = tk.Checkbutton(body, text=label, variable=variable, command=command, bg=BG, fg=INK, selectcolor=SURFACE, activebackground=BG, activeforeground=INK, anchor="w")
+        box.pack(fill="x", pady=1)
+        return box
 
     auth = section("1  Secure authentication")
     check(auth, "Enable secure authentication", enabled, lambda: host.set_flag("sav5", enabled.get()))
@@ -452,7 +454,9 @@ def _build_security(parent: tk.Frame, host) -> dict:
     for name, label in boxes:
         variable = tk.BooleanVar(value=name != "time_write")
         policy_vars[name] = variable
-        check(policy, label, variable, lambda n=name, v=variable: host.set_policy(n, v.get()))
+        box = check(policy, label, variable, lambda n=name, v=variable: host.set_policy(n, v.get()))
+        if name != "time_write":
+            box.configure(state="disabled")
 
     diag = section("5  Diagnostics")
     for label, name in (
