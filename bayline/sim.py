@@ -23,7 +23,7 @@ def simulate(station: Station, now: int, dt_sec: float) -> None:
     a2 = 142 if f2 else 0
     v1 = _setpoint(station, 0) if f1 else 0
     v2 = _setpoint(station, 1) if f2 else 0
-    hz, temp, batt = 60.0, 68.0, 125.4
+    hz, temp, batt = 50.12, 68.0, 125.4
     _ease(station, 0, kv, 0.012, now)
     _ease(station, 10, v1, 0.008, now)
     _ease(station, 11, v2, 0.008, now)

@@ -230,7 +230,7 @@ def create_station() -> Station:
         _point("ai", 2, "Feeder 2 current", 142, "A", 2, 10, 5, 5),
         _point("ai", 3, "Transformer load", 6726, "kW", 2, 250, 5, 5),
         _point("ai", 4, "Transformer reactive", 2210, "kVAr", 2, 120, 5, 5),
-        _point("ai", 5, "Frequency", 60, "Hz", 1, 0.03, 5, 7),
+        _point("ai", 5, "Frequency", 50.12, "Hz", 1, 0.03, 5, 7),
         _point("ai", 6, "T1 oil temperature", 68, "°C", 3, 1.5, 5, 5),
         _point("ai", 7, "Feeder 1 load", 3816, "kW", 2, 160, 5, 5),
         _point("ai", 8, "Feeder 2 load", 2910, "kW", 2, 160, 5, 5),
