@@ -187,7 +187,10 @@ def run_gui(host) -> None:
         selected = points.selection()
         points.delete(*points.get_children())
         for kind, index, name, value, units, held in snap["points"]:
-            shown_value = "CLOSED" if value >= 0.5 else "OPEN" if kind in ("bi", "bo") else f"{value:.2f} {units}".strip()
+            if kind in ("bi", "bo"):
+                shown_value = "CLOSED" if value >= 0.5 else "OPEN"
+            else:
+                shown_value = f"{value:.2f} {units}".strip()
             if held:
                 shown_value += "  held"
             address = f"{_group(kind)}:{index}"
