@@ -187,12 +187,7 @@ def run_gui(host) -> None:
         selected = points.selection()
         points.delete(*points.get_children())
         for kind, index, name, value, units, held in snap["points"]:
-            if kind in ("bi", "bo"):
-                shown_value = "CLOSED" if value >= 0.5 else "OPEN"
-            else:
-                shown_value = f"{value:.2f} {units}".strip()
-            if held:
-                shown_value += "  held"
+            shown_value = _shown(kind, index, value, units, held)
             address = f"{_group(kind)}:{index}"
             points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, name, shown_value))
         if selected:
@@ -262,6 +257,31 @@ def _verdict(snap: dict) -> tuple[str, str]:
     if snap["quiet"] is not None and snap["quiet"] > 15000:
         return "Idle", f"Listening on port {snap['port']}. Nothing has been received for {round(snap['quiet'] / 1000)} seconds."
     return "Waiting", f"Listening on port {snap['port']}, address {snap['outstation']}. No TCP master is connected."
+
+
+def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
+    if kind == "bo":
+        text = "Latched" if value >= 0.5 else "Dropped"
+    elif kind == "bi":
+        if index <= 3:
+            text = "Closed" if value >= 0.5 else "Open"
+        elif index == 10:
+            text = "Remote" if value >= 0.5 else "Local"
+        else:
+            text = "Alarm" if value >= 0.5 else "Normal"
+    else:
+        if units == "Hz":
+            number = f"{value:.3f}"
+        elif units == "kV":
+            number = f"{value:.2f}"
+        elif units in ("VDC", "°C"):
+            number = f"{value:.1f}"
+        else:
+            number = f"{round(value):,}"
+        text = f"{number} {units}".strip()
+    if held:
+        text += "  held"
+    return text
 
 
 def _group(kind: str) -> int:
