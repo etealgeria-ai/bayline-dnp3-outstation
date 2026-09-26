@@ -102,6 +102,18 @@ class Built:
 
 
 STAT_THRESHOLD = (2, 2, 2, 2, 2, 100, 100, 100, 100, 10, 2, 10, 100, 2, 2, 2, 2, 2)
+# Message totals stay on g121. They must not occupy the event buffer.
+NO_EVENT_STATS = {5, 6, 7, 8}
+
+
+def _trim_events(station: Station) -> None:
+    while len(station.events) > station.event_max:
+        security = next((i for i, event in enumerate(station.events) if event.kind == "sec"), None)
+        if security is not None:
+            station.events.pop(security)
+            continue
+        station.events.pop(0)
+        station.overflow = True
 
 
 def _stat(station: Station, index: int, now: int, step: int = 1) -> None:
@@ -112,13 +124,13 @@ def _stat(station: Station, index: int, now: int, step: int = 1) -> None:
     if station.security[index] - station.security_sent[index] < threshold:
         return
     station.security_sent[index] = station.security[index]
+    if index in NO_EVENT_STATS:
+        return
     station.events.append(
         DnpEvent(station.next_event_id, "sec", index, float(station.security[index]), 0x01, outstation_now(station, now), 3, 2)
     )
     station.next_event_id += 1
-    while len(station.events) > station.event_max:
-        station.events.pop(0)
-        station.overflow = True
+    _trim_events(station)
 
 
 def handle_frame(station: Station, data: bytes, now: int) -> list[bytes]:
@@ -871,9 +883,7 @@ def _push_event(station: Station, point: Point, now: int) -> None:
     station.next_event_id += 1
     point.last_event_value = point.value
     point.last_flags = point.flags
-    while len(station.events) > station.event_max:
-        station.events.pop(0)
-        station.overflow = True
+    _trim_events(station)
 
 
 def _mark_pending(station: Station, seq: int, unsol: bool, event_ids: list[int], now: int) -> None:

@@ -19,7 +19,7 @@ from bayline.codec import (
     parse_hex,
 )
 from bayline.crypto import aes256_unwrap, aes256_wrap, hmac_sha256, same_bytes
-from bayline.outstation import handle_frame
+from bayline.outstation import _stat, handle_frame
 from bayline.station import KEY_OK, create_station, find_point
 from bayline.__main__ import serve
 
@@ -182,6 +182,14 @@ def run() -> None:
     still = [event.id for event in station.events if event.kind == "bi"]
     check(any(item in still for item in kept), "statistic events pushed the breaker event out of the buffer")
     check(not station.overflow, "routine reads overflowed the event buffer")
+    trip = next(event for event in station.events if event.kind == "bi")
+    station.event_max = 2
+    station.events[:] = [trip]
+    for _ in range(6):
+        station.security_sent[2] = station.security[2]
+        _stat(station, 2, NOW, 2)
+    check(any(event.id == trip.id for event in station.events), "a security event evicted the breaker trip")
+    check(not station.overflow, "dropping a security event set the process overflow bit")
     for _ in range(3):
         again = exchange(station, master(4, 100, bytes((0xC3, FC_AUTH_REQUEST, 120, 4, 0x5B, 1, 2, 0, 1, 0))))
         check(len(again) == 1, "key status stopped after repeated requests")
