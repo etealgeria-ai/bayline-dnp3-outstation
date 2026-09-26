@@ -168,8 +168,14 @@ class Host:
                 return "Select a point first."
             if point.kind in ("bi", "bo"):
                 value = 1 if value >= 0.5 else 0
+            if point.kind == "ao" and not 10.5 <= value <= 14.4:
+                return "Regulator setpoint must be between 10.5 and 14.4 kV."
             write_point(self.station, point, value, point.flags, int(time.time() * 1000), "control")
-            point.manual = True
+            point.manual = point.kind != "ao"
+            if point.kind == "ao" and point.index in (0, 1):
+                measured = find_point(self.station, "ai", 10 + point.index)
+                if measured:
+                    measured.manual = False
         return None
 
     def release_point(self, kind: str, index: int) -> None:

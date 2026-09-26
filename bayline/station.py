@@ -235,6 +235,8 @@ def create_station() -> Station:
         _point("ai", 7, "Feeder 1 load", 3816, "kW", 2, 160, 5, 5),
         _point("ai", 8, "Feeder 2 load", 2910, "kW", 2, 160, 5, 5),
         _point("ai", 9, "Battery", 125.4, "VDC", 3, 0.8, 5, 5),
+        _point("ai", 10, "Feeder 1 voltage", 12.47, "kV", 2, 0.05, 5, 5),
+        _point("ai", 11, "Feeder 2 voltage", 12.47, "kV", 2, 0.05, 5, 5),
         _point("ctr", 0, "Feeder 1 energy", 184320, "kWh", 3, 50, 1, 1),
         _point("ctr", 1, "Feeder 2 energy", 142110, "kWh", 3, 50, 1, 1),
         _point("ctr", 2, "Feeder 1 operations", 146, "", 3, 1, 1, 5),
