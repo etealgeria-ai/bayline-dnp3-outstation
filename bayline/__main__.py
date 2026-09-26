@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 
-from bayline.codec import encode_frame, frame_size, parse_hex
+from bayline.codec import frame_size
 from bayline.outstation import flush_unsolicited, handle_frame, housekeep
 from bayline.sim import simulate
 from bayline.station import LogItem, create_station
@@ -152,31 +152,6 @@ class Host:
                 "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
             }
 
-    def reset_link(self) -> None:
-        self._send(encode_frame(0xC0, self.station.outstation, self.station.master, b""))
-
-    def link_status(self) -> None:
-        self._send(encode_frame(0xC9, self.station.outstation, self.station.master, b""))
-
-    def test_link(self) -> None:
-        with self.lock:
-            fcb = 0x20 if self.station.expect_fcb else 0
-            frame = encode_frame(0xD2 | fcb, self.station.outstation, self.station.master, b"")
-        self._send(frame)
-
-    def send_apdu(self, apdu: bytes) -> None:
-        with self.lock:
-            fcb = 0x20 if self.station.expect_fcb else 0
-            frame = encode_frame(0xD3 | fcb, self.station.outstation, self.station.master, bytes((0xC0,)) + apdu)
-        self._send(frame)
-
-    def send_hex(self, text: str) -> str | None:
-        frame = parse_hex(text)
-        if not frame:
-            return "That is not hex. Use octets such as 05 64."
-        self._send(frame)
-        return None
-
     def set_flag(self, name: str, value: bool) -> None:
         with self.lock:
             if name == "sav5":
@@ -196,10 +171,6 @@ class Host:
                 self.station.outstation = value
             else:
                 self.station.master = value
-
-    def _send(self, frame: bytes) -> None:
-        with self.lock:
-            handle_frame(self.station, frame, int(time.time() * 1000))
 
     def _note(self, summary: str) -> None:
         with self.lock:

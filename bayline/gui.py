@@ -6,7 +6,6 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from bayline.codec import push_time48
 from bayline.outstation import write_point
 from bayline.station import KEY_AUTH_FAIL, KEY_OK, find_point
 
@@ -61,7 +60,6 @@ def run_gui(host) -> None:
     book.pack(fill="both", expand=True, padx=16, pady=(0, 16))
     points_tab = _tab(book, "Points")
     comms_tab = _tab(book, "Comms")
-    master_tab = _tab(book, "Master")
     wire_tab = _tab(book, "Wire")
     security_tab = _tab(book, "Security")
 
@@ -92,50 +90,11 @@ def run_gui(host) -> None:
 
     wire.bind("<<ListboxSelect>>", on_wire)
 
-    master = tk.Frame(master_tab, bg=BG)
-    master.pack(fill="both", expand=True, padx=8, pady=8)
-    commands = [
-        ("Integrity poll", lambda: host.send_apdu(bytes((0xC0, 1, 60, 2, 6, 60, 3, 6, 60, 4, 6, 60, 1, 6)))),
-        ("Clear restart", lambda: host.send_apdu(bytes((0xC0, 2, 80, 1, 0x00, 7, 7, 0x01)))),
-        ("Class 1", lambda: host.send_apdu(bytes((0xC0, 1, 60, 2, 6)))),
-        ("Class 2", lambda: host.send_apdu(bytes((0xC0, 1, 60, 3, 6)))),
-        ("Class 3", lambda: host.send_apdu(bytes((0xC0, 1, 60, 4, 6)))),
-        ("Time sync", _time_sync),
-        ("Reset link", host.reset_link),
-        ("Test link", host.test_link),
-        ("Read status", lambda: host.send_apdu(bytes((0xC0, 1, 1, 0, 6)))),
-        ("Read analogs", lambda: host.send_apdu(bytes((0xC0, 1, 30, 0, 6)))),
-        ("Read counters", lambda: host.send_apdu(bytes((0xC0, 1, 20, 0, 6)))),
-        ("Device attrs", lambda: host.send_apdu(bytes((0xC0, 1, 0, 255, 6)))),
-        ("Freeze counters", lambda: host.send_apdu(bytes((0xC0, 7, 20, 0, 6)))),
-        ("Delay measure", lambda: host.send_apdu(bytes((0xC0, 23)))),
-        ("Enable unsol", lambda: host.send_apdu(bytes((0xC0, 20, 60, 2, 6, 60, 3, 6, 60, 4, 6)))),
-        ("Disable unsol", lambda: host.send_apdu(bytes((0xC0, 21, 60, 2, 6, 60, 3, 6, 60, 4, 6)))),
-        ("Cold restart", lambda: host.send_apdu(bytes((0xC0, 13)))),
-        ("Warm restart", lambda: host.send_apdu(bytes((0xC0, 14)))),
-        ("App confirm", _confirm),
-        ("Link status", host.link_status),
-    ]
-    for index, (title, action) in enumerate(commands):
-        target = (lambda fn=action: fn(host)) if action in (_time_sync, _confirm) else action
-        tk.Button(master, text=title, command=target, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=8).grid(row=index // 2, column=index % 2, sticky="ew", padx=4, pady=4)
-    master.grid_columnconfigure(0, weight=1)
-    master.grid_columnconfigure(1, weight=1)
-    hex_box = tk.Text(master, height=3, bg=SURFACE, fg=INK, insertbackground=INK, relief="flat", font=("Consolas", 10))
-    hex_box.grid(row=len(commands) // 2 + 1, column=0, columnspan=2, sticky="ew", padx=4, pady=(8, 4))
-    hex_error = tk.StringVar()
-    tk.Label(master, textvariable=hex_error, bg=BG, fg=ALARM, anchor="w").grid(row=len(commands) // 2 + 2, column=0, columnspan=2, sticky="w")
-
-    def send_hex() -> None:
-        message = host.send_hex(hex_box.get("1.0", "end"))
-        hex_error.set(message or "")
-
-    tk.Button(master, text="Send hex", command=send_hex, bg=AMBER, fg="#1a140c", relief="flat", padx=8, pady=8).grid(row=len(commands) // 2 + 3, column=0, sticky="ew", padx=4, pady=4)
-    tk.Button(master, text="SAv5 on/off", command=lambda: host.set_flag("sav5", not host.snapshot()["sav"]["enabled"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=8).grid(row=len(commands) // 2 + 3, column=1, sticky="ew", padx=4, pady=4)
-    toggles = tk.Frame(master, bg=BG)
-    toggles.grid(row=len(commands) // 2 + 4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-    tk.Button(toggles, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=8).pack(side="left", padx=(0, 6))
-    tk.Button(toggles, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=8).pack(side="left")
+    security_actions = tk.Frame(security_tab, bg=BG)
+    security_actions.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+    tk.Button(security_actions, text="SAv5 on/off", command=lambda: host.set_flag("sav5", not host.snapshot()["sav"]["enabled"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    tk.Button(security_actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+    tk.Button(security_actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left")
 
     log_key: list[tuple] = [()]
 
@@ -223,7 +182,7 @@ def run_gui(host) -> None:
                 if not ok:
                     wire.itemconfig("end", fg=ALARM)
             if not snap["log"]:
-                wire.insert("end", "No frames yet. Run an integrity poll, or connect a master on port 20000.")
+                wire.insert("end", "No frames yet. Connect a master on port 20000.")
             wire.yview_moveto(1)
         root.after(500, refresh)
 
@@ -275,19 +234,6 @@ def _verdict(snap: dict) -> tuple[str, str]:
     if snap["quiet"] is not None and snap["quiet"] > 15000:
         return "Idle", f"Listening on port {snap['port']}. Nothing has been received for {round(snap['quiet'] / 1000)} seconds."
     return "Waiting", f"Listening on port {snap['port']}, address {snap['outstation']}. No TCP master is connected."
-
-
-def _time_sync(host) -> None:
-    body = bytearray((0xC0, 2, 50, 1, 0x07, 1))
-    push_time48(body, int(time.time() * 1000))
-    host.send_apdu(bytes(body))
-
-
-def _confirm(host) -> None:
-    snap = host.snapshot()
-    if snap["confirm"] is None:
-        return
-    host.send_apdu(bytes((0xC0 | (snap["confirm"]["seq"] & 0x0F), 0)))
 
 
 def _toggle(host) -> None:
