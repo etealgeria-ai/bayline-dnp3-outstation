@@ -278,10 +278,10 @@ def _draw_trend(canvas: tk.Canvas, rows: list[dict]) -> None:
     width = max(canvas.winfo_width(), 480)
     height = max(canvas.winfo_height(), 360)
     bands = [
-        ("Voltage", [("ai", 0, "Bus", AMBER), ("ai", 10, "F1", "#7dcea0"), ("ai", 11, "F2", "#5dade2")], "kV"),
-        ("Current", [("ai", 1, "F1", ALARM), ("ai", 2, "F2", "#f0b27a")], "A"),
-        ("Frequency", [("ai", 5, "Hz", "#d7bde2")], "Hz"),
-        ("Load", [("ai", 7, "F1", "#82e0aa"), ("ai", 8, "F2", "#85c1e9")], "kW"),
+        ("Voltage", [(("ai", 0), "Bus", AMBER), (("ai", 10), "F1", "#7dcea0"), (("ai", 11), "F2", "#5dade2")], "kV"),
+        ("Current", [(("ai", 1), "F1", ALARM), (("ai", 2), "F2", "#f0b27a")], "A"),
+        ("Frequency", [(("ai", 5), "Hz", "#d7bde2")], "Hz"),
+        ("Load", [(("ai", 7), "F1", "#82e0aa"), (("ai", 8), "F2", "#85c1e9")], "kW"),
     ]
     gap = 10
     band_h = (height - gap * (len(bands) + 1)) / len(bands)
