@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 
-from bayline.codec import frame_size
+from bayline.codec import encode_frame, frame_size, parse_hex
 from bayline.outstation import flush_unsolicited, handle_frame, housekeep
 from bayline.sim import simulate
 from bayline.station import LogItem, create_station
@@ -105,6 +105,12 @@ class Host:
     def snapshot(self) -> dict:
         with self.lock:
             station = self.station
+            sav = station.sav5
+            pending = station.pending_confirm
+            armed = station.select
+            now = int(time.time() * 1000)
+            frames = [item for item in station.log if item.direction in ("in", "out")]
+            last = frames[-1].time if frames else None
             return {
                 "name": station.name,
                 "outstation": station.outstation,
@@ -114,10 +120,86 @@ class Host:
                 "port": self.port,
                 "clients": len(self.clients),
                 "error": self.error,
-                "sav_status": station.sav5.os.status,
+                "restart": station.restart,
+                "need_time": station.need_time,
+                "local": station.local,
+                "sim_on": station.sim_on,
+                "unsol": dict(station.unsol),
+                "confirm": None if pending is None else {"seq": pending.seq, "left": max(0, int((pending.deadline - now) / 1000))},
+                "select": None if armed is None else {"group": armed.group, "index": armed.index, "left": max(0, int((armed.deadline - now) / 1000))},
+                "classes": {
+                    1: sum(1 for event in station.events if event.clazz == 1),
+                    2: sum(1 for event in station.events if event.clazz == 2),
+                    3: sum(1 for event in station.events if event.clazz == 3),
+                },
+                "rx": sum(1 for item in station.log if item.direction == "in"),
+                "tx": sum(1 for item in station.log if item.direction == "out"),
+                "bad": sum(1 for item in station.log if not item.ok),
+                "quiet": None if last is None else max(0, now - last),
+                "sav": {
+                    "enabled": sav.enabled,
+                    "aggressive": sav.aggressive,
+                    "user": sav.user,
+                    "status": sav.os.status,
+                    "ksq": sav.os.ksq,
+                    "csq": sav.os.csq,
+                    "ok": sav.ok_count,
+                    "fail": sav.fail_count,
+                    "result": sav.last_result,
+                    "key": sav.update_key.hex(),
+                },
                 "points": [(p.kind, p.index, p.name, p.value, p.units) for p in station.points],
-                "log": [(item.direction, item.summary, item.ok) for item in station.log[-16:]],
+                "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
             }
+
+    def reset_link(self) -> None:
+        self._send(encode_frame(0xC0, self.station.outstation, self.station.master, b""))
+
+    def link_status(self) -> None:
+        self._send(encode_frame(0xC9, self.station.outstation, self.station.master, b""))
+
+    def test_link(self) -> None:
+        with self.lock:
+            fcb = 0x20 if self.station.expect_fcb else 0
+            frame = encode_frame(0xD2 | fcb, self.station.outstation, self.station.master, b"")
+        self._send(frame)
+
+    def send_apdu(self, apdu: bytes) -> None:
+        with self.lock:
+            fcb = 0x20 if self.station.expect_fcb else 0
+            frame = encode_frame(0xD3 | fcb, self.station.outstation, self.station.master, bytes((0xC0,)) + apdu)
+        self._send(frame)
+
+    def send_hex(self, text: str) -> str | None:
+        frame = parse_hex(text)
+        if not frame:
+            return "That is not hex. Use octets such as 05 64."
+        self._send(frame)
+        return None
+
+    def set_flag(self, name: str, value: bool) -> None:
+        with self.lock:
+            if name == "sav5":
+                self.station.sav5.enabled = value
+            elif name == "aggressive":
+                self.station.sav5.aggressive = value
+            elif name == "local":
+                self.station.local = value
+            elif name == "sim":
+                self.station.sim_on = value
+
+    def set_address(self, which: str, value: int) -> None:
+        if not 0 <= value <= 65534:
+            return
+        with self.lock:
+            if which == "outstation":
+                self.station.outstation = value
+            else:
+                self.station.master = value
+
+    def _send(self, frame: bytes) -> None:
+        with self.lock:
+            handle_frame(self.station, frame, int(time.time() * 1000))
 
     def _note(self, summary: str) -> None:
         with self.lock:
