@@ -1,0 +1,256 @@
+"""Riverside 12 kV point database and SAv5 session."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from bayline.crypto import CHALLENGE_LEN, MAC_LEN, SESSION_KEY_LEN, UPDATE_KEY_LEN, hex_to_bytes
+
+BI_ONLINE = 0x01
+BI_STATE = 0x80
+AI_ONLINE = 0x01
+CTR_ONLINE = 0x01
+RESTART_FLAG = 0x02
+DEFAULT_UPDATE_KEY_HEX = "b4711e5a09c3d8f64e2a77b0c15d93a8e60f4c2b8d7195a3f6e0c4b7d2a81935"
+PROVISIONED_USER = 1
+MAL = 4
+KWA = 2
+UK_METHOD = 4
+KEY_OK = 1
+KEY_NOT_INIT = 2
+KEY_AUTH_FAIL = 4
+ERR_AUTH_FAILED = 1
+ERR_UNEXPECTED = 2
+ERR_UNKNOWN_USER = 11
+ERR_UK_METHOD = 8
+ERR_SIGNATURE = 9
+CRITICAL = {3, 4, 5, 6, 7, 8, 9, 10, 13, 14}
+
+
+@dataclass
+class Point:
+    kind: str
+    index: int
+    name: str
+    units: str
+    value: float
+    flags: int
+    clazz: int
+    deadband: float
+    static_var: int
+    event_var: int
+    last_event_value: float
+    last_flags: int
+    feedback: int | None = None
+    op_counter: int | None = None
+    frozen: float | None = None
+
+
+@dataclass
+class DnpEvent:
+    id: int
+    kind: str
+    index: int
+    value: float
+    flags: int
+    time: int
+    clazz: int
+    variation: int
+    held: bool = False
+
+
+@dataclass
+class SelectArm:
+    group: int
+    variation: int
+    index: int
+    body: bytes
+    deadline: int
+
+
+@dataclass
+class PendingConfirm:
+    seq: int
+    unsol: bool
+    event_ids: list[int]
+    deadline: int
+
+
+@dataclass
+class OsSession:
+    status: int = KEY_NOT_INIT
+    ksq: int = 0
+    csq: int = 1
+    accepted_csq: int = 0
+    control_key: bytes = b""
+    monitor_key: bytes = b""
+    key_challenge: bytes = b""
+    last_status_mac: bytes = b""
+    challenge_apdu: bytes = b""
+
+
+@dataclass
+class PendingAuth:
+    seq: int
+    csq: int
+    user: int
+    challenge_apdu: bytes
+    critical_apdu: bytes
+    deadline: int
+
+
+@dataclass
+class PendingUpdateKey:
+    ksq: int
+    user: int
+    outstation_challenge: bytes
+
+
+@dataclass
+class Sav5:
+    enabled: bool = True
+    aggressive: bool = False
+    user: int = PROVISIONED_USER
+    update_key: bytes = field(default_factory=lambda: hex_to_bytes(DEFAULT_UPDATE_KEY_HEX, UPDATE_KEY_LEN) or b"")
+    os: OsSession = field(default_factory=OsSession)
+    pending: PendingAuth | None = None
+    update_pending: PendingUpdateKey | None = None
+    bypass: bool = False
+    ok_count: int = 0
+    fail_count: int = 0
+    last_error: int = 0
+    last_result: str = "Session keys are not initialized. The first critical control will wrap a fresh pair."
+
+
+@dataclass
+class LogItem:
+    id: int
+    time: int
+    direction: str
+    summary: str
+    detail: str
+    hex: str
+    ok: bool
+
+
+@dataclass
+class Station:
+    name: str = "Riverside 12 kV"
+    location: str = "Riverside Substation"
+    outstation: int = 4
+    master: int = 100
+    link_reset: bool = False
+    expect_fcb: bool = True
+    unsol_seq: int = 0
+    tx_transport: int = 0
+    restart: bool = True
+    need_time: bool = True
+    trouble: bool = False
+    local: bool = False
+    overflow: bool = False
+    time_offset: int = 0
+    select: SelectArm | None = None
+    pending_confirm: PendingConfirm | None = None
+    unsol: dict[str, bool] = field(default_factory=lambda: {"c1": False, "c2": False, "c3": False})
+    confirm_timeout: int = 8000
+    select_timeout: int = 10000
+    event_max: int = 80
+    proc_delay: int = 18
+    energy_scale: float = 4
+    points: list[Point] = field(default_factory=list)
+    events: list[DnpEvent] = field(default_factory=list)
+    next_event_id: int = 1
+    log: list[LogItem] = field(default_factory=list)
+    next_log_id: int = 1
+    sim_on: bool = True
+    scenario: str = "normal"
+    scenario_since: int = 0
+    fault_stage: int = 0
+    sav5: Sav5 = field(default_factory=Sav5)
+
+
+def _flags(kind: str, closed: bool) -> int:
+    if kind in ("bi", "bo"):
+        return (BI_ONLINE | (BI_STATE if closed else 0)) | RESTART_FLAG
+    if kind == "ctr":
+        return CTR_ONLINE | RESTART_FLAG
+    return AI_ONLINE | RESTART_FLAG
+
+
+def _point(kind, index, name, value, units, clazz, deadband, static_var, event_var, feedback=None, op_counter=None) -> Point:
+    flags = _flags(kind, value >= 0.5)
+    return Point(kind, index, name, units, value, flags, clazz, deadband, static_var, event_var, value, flags, feedback, op_counter)
+
+
+def create_station() -> Station:
+    rows = [
+        _point("bi", 0, "52-T1 transformer breaker", 1, "", 1, 0, 2, 2),
+        _point("bi", 1, "52-F1 feeder breaker", 1, "", 1, 0, 2, 2),
+        _point("bi", 2, "52-F2 feeder breaker", 1, "", 1, 0, 2, 2),
+        _point("bi", 3, "89-BS bus tie", 1, "", 1, 0, 2, 2),
+        _point("bi", 4, "27 bus undervoltage", 0, "", 1, 0, 2, 2),
+        _point("bi", 5, "50-F1 instantaneous OC", 0, "", 1, 0, 2, 2),
+        _point("bi", 6, "50-F2 instantaneous OC", 0, "", 1, 0, 2, 2),
+        _point("bi", 7, "79-F1 recloser lockout", 0, "", 1, 0, 2, 2),
+        _point("bi", 8, "63-T1 sudden pressure", 0, "", 1, 0, 2, 2),
+        _point("bi", 9, "Station alarm", 0, "", 2, 0, 2, 2),
+        _point("bi", 10, "Remote / local", 1, "", 1, 0, 2, 2),
+        _point("bi", 11, "T1 high oil temperature", 0, "", 2, 0, 2, 2),
+        _point("bo", 0, "52-T1 control", 1, "", 0, 0, 2, 2, feedback=0),
+        _point("bo", 1, "52-F1 control", 1, "", 0, 0, 2, 2, feedback=1, op_counter=2),
+        _point("bo", 2, "52-F2 control", 1, "", 0, 0, 2, 2, feedback=2, op_counter=3),
+        _point("bo", 3, "89-BS control", 1, "", 0, 0, 2, 2, feedback=3),
+        _point("ai", 0, "Bus voltage", 12.47, "kV", 2, 0.08, 5, 5),
+        _point("ai", 1, "Feeder 1 current", 186, "A", 2, 10, 5, 5),
+        _point("ai", 2, "Feeder 2 current", 142, "A", 2, 10, 5, 5),
+        _point("ai", 3, "Transformer load", 6726, "kW", 2, 250, 5, 5),
+        _point("ai", 4, "Transformer reactive", 2210, "kVAr", 2, 120, 5, 5),
+        _point("ai", 5, "Frequency", 60, "Hz", 1, 0.03, 5, 7),
+        _point("ai", 6, "T1 oil temperature", 68, "°C", 3, 1.5, 5, 5),
+        _point("ai", 7, "Feeder 1 load", 3816, "kW", 2, 160, 5, 5),
+        _point("ai", 8, "Feeder 2 load", 2910, "kW", 2, 160, 5, 5),
+        _point("ai", 9, "Battery", 125.4, "VDC", 3, 0.8, 5, 5),
+        _point("ctr", 0, "Feeder 1 energy", 184320, "kWh", 3, 50, 1, 1),
+        _point("ctr", 1, "Feeder 2 energy", 142110, "kWh", 3, 50, 1, 1),
+        _point("ctr", 2, "Feeder 1 operations", 146, "", 3, 1, 1, 5),
+        _point("ctr", 3, "Feeder 2 operations", 121, "", 3, 1, 1, 5),
+        _point("ao", 0, "Feeder 1 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
+        _point("ao", 1, "Feeder 2 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
+    ]
+    return Station(points=rows)
+
+
+def find_point(station: Station, kind: str, index: int) -> Point | None:
+    for point in station.points:
+        if point.kind == kind and point.index == index:
+            return point
+    return None
+
+
+def points_of(station: Station, kind: str) -> list[Point]:
+    return sorted((p for p in station.points if p.kind == kind), key=lambda p: p.index)
+
+
+def sync_binary_flag(point: Point) -> None:
+    if point.kind not in ("bi", "bo"):
+        return
+    if point.value >= 0.5:
+        point.flags |= BI_STATE
+    else:
+        point.flags &= ~BI_STATE
+
+
+def outstation_now(station: Station, now: int) -> int:
+    return now + station.time_offset
+
+
+def reset_session_keys(sav: Sav5) -> None:
+    ksq, csq = sav.os.ksq, sav.os.csq
+    sav.os = OsSession(ksq=ksq, csq=csq)
+    sav.pending = None
+    sav.update_pending = None
+    sav.bypass = False
+
+
+def is_critical(fc: int) -> bool:
+    return fc in CRITICAL
