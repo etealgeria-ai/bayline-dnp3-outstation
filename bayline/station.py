@@ -88,6 +88,7 @@ class OsSession:
     key_challenge: bytes = b""
     last_status_mac: bytes = b""
     challenge_apdu: bytes = b""
+    keys_at: int = 0
 
 
 @dataclass
@@ -108,19 +109,55 @@ class PendingUpdateKey:
 
 
 @dataclass
+class AuthPolicy:
+    controls: bool = True
+    crob: bool = True
+    analog: bool = True
+    direct_operate: bool = True
+    direct_operate_nr: bool = True
+    select_operate: bool = True
+    cold_restart: bool = True
+    warm_restart: bool = True
+    time_write: bool = False
+    file_transfer: bool = False
+
+
+ROLES = {
+    "Viewer": (2, False),
+    "Operator": (1, True),
+    "Engineer": (3, True),
+    "Installer": (4, True),
+    "SECADM": (5, True),
+}
+
+
+def role_can_control(sav: Sav5) -> bool:
+    return ROLES.get(sav.role, (sav.user, True))[1]
+
+
+@dataclass
 class Sav5:
     enabled: bool = True
     version: int = 5
     aggressive: bool = False
+    role: str = "Operator"
     user: int = PROVISIONED_USER
     update_key: bytes = field(default_factory=lambda: hex_to_bytes(DEFAULT_UPDATE_KEY_HEX, UPDATE_KEY_LEN) or b"")
     os: OsSession = field(default_factory=OsSession)
     pending: PendingAuth | None = None
     update_pending: PendingUpdateKey | None = None
     bypass: bool = False
+    policy: AuthPolicy = field(default_factory=AuthPolicy)
+    challenge_timeout_ms: int = 5000
+    session_lifetime_s: int = 3600
     ok_count: int = 0
     fail_count: int = 0
+    challenges_sent: int = 0
+    challenges_rx: int = 0
+    key_changes: int = 0
     last_error: int = 0
+    last_user: int = 0
+    last_auth_time: int = 0
     last_result: str = "SAv5 selected. Session keys are not initialized."
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import threading
 import time
@@ -10,7 +11,8 @@ import time
 from bayline.codec import frame_size
 from bayline.outstation import flush_unsolicited, handle_frame, housekeep, write_point
 from bayline.sim import simulate
-from bayline.station import LogItem, auth_profile, create_station, find_point, reset_session_keys, update_key_material
+from bayline.crypto import hex_to_bytes
+from bayline.station import ROLES, LogItem, auth_profile, create_station, find_point, reset_session_keys, update_key_material
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 20000
@@ -145,11 +147,31 @@ class Host:
                     "wrap_name": profile.wrap_name,
                     "aggressive": sav.aggressive,
                     "user": sav.user,
+                    "role": sav.role,
                     "status": sav.os.status,
                     "ksq": sav.os.ksq,
                     "csq": sav.os.csq,
                     "ok": sav.ok_count,
                     "fail": sav.fail_count,
+                    "challenges_sent": sav.challenges_sent,
+                    "challenges_rx": sav.challenges_rx,
+                    "key_changes": sav.key_changes,
+                    "last_user": sav.last_user,
+                    "last_auth_time": sav.last_auth_time,
+                    "challenge_timeout_ms": sav.challenge_timeout_ms,
+                    "session_lifetime_s": sav.session_lifetime_s,
+                    "policy": {
+                        "controls": sav.policy.controls,
+                        "crob": sav.policy.crob,
+                        "analog": sav.policy.analog,
+                        "direct_operate": sav.policy.direct_operate,
+                        "direct_operate_nr": sav.policy.direct_operate_nr,
+                        "select_operate": sav.policy.select_operate,
+                        "cold_restart": sav.policy.cold_restart,
+                        "warm_restart": sav.policy.warm_restart,
+                        "time_write": sav.policy.time_write,
+                        "file_transfer": sav.policy.file_transfer,
+                    },
                     "result": sav.last_result,
                     "key": update_key_material(sav).hex(),
                 },
@@ -183,6 +205,47 @@ class Host:
             point = find_point(self.station, kind, index)
             if point:
                 point.manual = False
+
+    def set_role(self, role: str) -> None:
+        spec = ROLES.get(role)
+        if spec is None:
+            return
+        with self.lock:
+            sav = self.station.sav5
+            sav.role = role
+            sav.user = spec[0]
+            reset_session_keys(sav)
+            sav.last_result = f"Role {role}, user {sav.user}. Session keys were cleared. The master must authenticate as this user."
+        self._note(f"Role {role}")
+
+    def set_policy(self, name: str, value: bool) -> None:
+        with self.lock:
+            if hasattr(self.station.sav5.policy, name):
+                setattr(self.station.sav5.policy, name, value)
+
+    def set_auth_limits(self, challenge_ms: int, lifetime_s: int) -> None:
+        with self.lock:
+            sav = self.station.sav5
+            sav.challenge_timeout_ms = max(500, min(60000, challenge_ms))
+            sav.session_lifetime_s = max(30, min(86400, lifetime_s))
+
+    def set_update_key(self, text: str) -> str | None:
+        key = hex_to_bytes(text, 32)
+        if key is None:
+            return "Update key must be 32 octets of hex."
+        with self.lock:
+            self.station.sav5.update_key = key
+            reset_session_keys(self.station.sav5)
+            self.station.sav5.last_result = "Update key imported. Session keys were cleared."
+        return None
+
+    def generate_update_key(self) -> str:
+        key = os.urandom(32)
+        with self.lock:
+            self.station.sav5.update_key = key
+            reset_session_keys(self.station.sav5)
+            self.station.sav5.last_result = "A new update key was generated. Load the same key in the master."
+        return key.hex()
 
     def set_auth_version(self, version: int) -> None:
         if version not in (2, 5):

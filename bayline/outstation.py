@@ -81,6 +81,7 @@ from bayline.station import (
     outstation_now,
     points_of,
     reset_session_keys,
+    role_can_control,
     sync_binary_flag,
     update_key_material,
 )
@@ -175,7 +176,7 @@ def process_app(station: Station, user: bytes, now: int) -> list[bytes]:
         return _auth_request(station, apdu, user, now)
     already = station.sav5.bypass
     station.sav5.bypass = False
-    if station.sav5.enabled and is_critical(fc) and not already:
+    if station.sav5.enabled and _needs_auth(station, apdu) and not already:
         held = _gate_critical(station, apdu, user, now)
         if held is not None:
             return held
@@ -197,12 +198,18 @@ def process_app(station: Station, user: bytes, now: int) -> list[bytes]:
         if fc in (FC_IMMED_FREEZE_NR, FC_FREEZE_CLEAR_NR):
             return []
     elif fc == FC_COLD_RESTART:
-        _cold_restart(station, now)
+        if role_can_control(station.sav5):
+            _cold_restart(station, now)
+        else:
+            station.sav5.last_result = f"{station.sav5.role} cannot restart the outstation."
         objects = _delay(1000)
     elif fc == FC_WARM_RESTART:
-        station.restart = True
-        station.need_time = True
-        station.select = None
+        if role_can_control(station.sav5):
+            station.restart = True
+            station.need_time = True
+            station.select = None
+        else:
+            station.sav5.last_result = f"{station.sav5.role} cannot restart the outstation."
         objects = _delay(200)
     elif fc in (FC_ENABLE_UNSOL, FC_DISABLE_UNSOL):
         extra2 |= _set_unsol(station, apdu, fc == FC_ENABLE_UNSOL)
@@ -459,6 +466,8 @@ def _command(station: Station, apdu: ParsedApdu, now: int, mode: str) -> tuple[b
 def _execute(station: Station, group: int, variation: int, index: int, raw: bytes, now: int) -> int:
     if station.local:
         return 7
+    if group in (12, 41) and not role_can_control(station.sav5):
+        return 9
     if group == 12:
         bo = find_point(station, "bo", index)
         if not bo:
@@ -959,8 +968,8 @@ def _auth_request(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> 
 
 def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now: int) -> list[bytes]:
     user = _u16(body, 0) if len(body) >= 2 else 0
-    if user != PROVISIONED_USER:
-        return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. Only user 1 (Operator) is provisioned.", now)
+    if user != station.sav5.user:
+        return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key. The association user is {station.sav5.user} ({station.sav5.role}).", now)
     os = station.sav5.os
     profile = auth_profile(station.sav5)
     os.last_status_mac = _mac(station, os.monitor_key, apdu_in) if os.status == KEY_OK and len(os.monitor_key) == profile.key_len else b""
@@ -973,7 +982,7 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     user = _u16(body, 4) if len(body) >= 6 else station.sav5.user
     ksq = _u32(body, 0) if len(body) >= 4 else 0
     wrapped = body[6:] if len(body) >= 6 else b""
-    if user != PROVISIONED_USER:
+    if user != station.sav5.user:
         return _auth_fail(station, seq, user, ERR_UNKNOWN_USER, f"User {user} has no update key.", now, ksq)
     os = station.sav5.os
     profile = auth_profile(station.sav5)
@@ -1001,6 +1010,8 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     os.last_status_mac = _mac(station, os.monitor_key, apdu_in)
     os.key_challenge = random_bytes(profile.challenge_len)
     station.sav5.pending = None
+    station.sav5.key_changes += 1
+    os.keys_at = now
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
     station.sav5.last_result = f"Session keys installed. KSQ {os.ksq}."
@@ -1035,6 +1046,9 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
     station.sav5.last_result = f"{profile.label} HMAC accepted for CSQ {csq}. The held request is executing."
+    station.sav5.challenges_rx += 1
+    station.sav5.last_user = user
+    station.sav5.last_auth_time = now
     _log(station, "note", f"{profile.label} HMAC accepted · CSQ {csq}", "The MAC covers the challenge fragment and the critical fragment.", "", True, now)
     station.sav5.bypass = True
     return process_app(station, bytes((0xC0,)) + pending.critical_apdu, now)
@@ -1050,14 +1064,14 @@ def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> lis
     if method != UK_METHOD:
         return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, f"Update-key method {method} is not permitted. This outstation accepts method 4.", now)
     name = body[5 : 5 + name_len].decode("ascii", "replace")
-    if name != "Operator":
-        return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'No user named "{name}".', now)
+    if name != station.sav5.role:
+        return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'No user named "{name}". The association role is {station.sav5.role}.', now)
     challenge = random_bytes(UK_CHALLENGE_LEN)
-    station.sav5.update_pending = PendingUpdateKey(station.sav5.os.ksq, PROVISIONED_USER, challenge)
+    station.sav5.update_pending = PendingUpdateKey(station.sav5.os.ksq, station.sav5.user, challenge)
     _log(station, "note", f"Update-key reply · KSQ {station.sav5.os.ksq}", "g120v12", "", True, now)
     reply = bytearray()
     push_u32(reply, station.sav5.os.ksq)
-    push_u16(reply, PROVISIONED_USER)
+    push_u16(reply, station.sav5.user)
     push_u16(reply, len(challenge))
     reply.extend(challenge)
     return [_auth_response(station, seq, _sized(120, 12, bytes(reply)))]
@@ -1095,10 +1109,51 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
     return [_apdu(seq, FC_RESPONSE, i1, i2, b"", False, False)]
 
 
+def _needs_auth(station: Station, apdu: ParsedApdu) -> bool:
+    policy = station.sav5.policy
+    groups = {obj.group for obj in apdu.objects}
+    fc = apdu.fc
+    if fc in (FC_SELECT, FC_OPERATE):
+        return policy.controls and policy.select_operate and _object_needs_auth(policy, groups)
+    if fc == FC_DIRECT_OPERATE:
+        return policy.controls and policy.direct_operate and _object_needs_auth(policy, groups)
+    if fc == FC_DIRECT_OPERATE_NR:
+        return policy.controls and policy.direct_operate_nr and _object_needs_auth(policy, groups)
+    if fc in (FC_IMMED_FREEZE, FC_IMMED_FREEZE_NR, FC_FREEZE_CLEAR, FC_FREEZE_CLEAR_NR):
+        return policy.controls
+    if fc == FC_COLD_RESTART:
+        return policy.cold_restart
+    if fc == FC_WARM_RESTART:
+        return policy.warm_restart
+    if fc == FC_WRITE and policy.time_write and 50 in groups:
+        return True
+    if fc in (25, 26, 27, 30) and policy.file_transfer:
+        return True
+    return False
+
+
+def _object_needs_auth(policy, groups: set[int]) -> bool:
+    wants_crob = 12 in groups and policy.crob
+    wants_analog = 41 in groups and policy.analog
+    if 12 in groups or 41 in groups:
+        return wants_crob or wants_analog
+    return policy.crob or policy.analog
+
+
+def _expire_session(station: Station, now: int) -> None:
+    sav = station.sav5
+    os = sav.os
+    if os.status != KEY_OK or not os.keys_at:
+        return
+    if now - os.keys_at <= sav.session_lifetime_s * 1000:
+        return
+    reset_session_keys(sav)
+    sav.last_result = "Session key lifetime elapsed. Wrap a new pair."
+
+
 def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) -> list[bytes] | None:
+    _expire_session(station, now)
     user_no = station.sav5.user
-    if user_no != PROVISIONED_USER:
-        return _auth_fail(station, apdu.seq, user_no, ERR_UNKNOWN_USER, f"User {user_no} is not provisioned.", now)
     aggressive = next((o for o in apdu.objects if o.group == 120 and o.variation == 3), None)
     mac = next((o for o in apdu.objects if o.group == 120 and o.variation == 9), None)
     if aggressive or mac:
@@ -1119,7 +1174,8 @@ def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) ->
     body.extend(data)
     challenge = _auth_response(station, apdu.seq, _sized(120, 1, bytes(body)))
     os.challenge_apdu = challenge
-    station.sav5.pending = PendingAuth(apdu.seq, csq, user_no, challenge, user[1:], now + 15000)
+    station.sav5.pending = PendingAuth(apdu.seq, csq, user_no, challenge, user[1:], now + station.sav5.challenge_timeout_ms)
+    station.sav5.challenges_sent += 1
     _log(station, "note", f"Challenged {FC_NAME.get(apdu.fc, apdu.fc)} · CSQ {csq} · user {user_no}", "g120v1, reason CRITICAL.", "", True, now)
     return [challenge]
 
@@ -1132,7 +1188,7 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
         return _auth_fail(station, apdu.seq, user_no, ERR_UNEXPECTED, "Aggressive mode needs both g120v3 and g120v9.", now)
     csq, who = _u32(raw, 0), _u16(raw, 4)
     os = station.sav5.os
-    if who != PROVISIONED_USER or who != user_no:
+    if who != station.sav5.user:
         return _auth_fail(station, apdu.seq, who, ERR_UNKNOWN_USER, f"Aggressive mode user {who} is not the association user.", now, csq)
     if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len or not os.challenge_apdu:
         return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive mode needs a prior challenge and valid session keys.", now, csq)
@@ -1150,5 +1206,8 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     station.sav5.ok_count += 1
     station.sav5.last_error = 0
     station.sav5.last_result = f"Aggressive mode accepted at CSQ {csq}."
+    station.sav5.challenges_rx += 1
+    station.sav5.last_user = who
+    station.sav5.last_auth_time = now
     _log(station, "note", f"Aggressive mode accepted · CSQ {csq}", "g120v3 plus g120v9.", "", True, now)
     return None

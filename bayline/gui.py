@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from bayline.outstation import write_point
-from bayline.station import KEY_AUTH_FAIL, KEY_OK, find_point
+from bayline.station import KEY_AUTH_FAIL, KEY_OK, ROLES, find_point
 
 BG = "#121816"
 SURFACE = "#1c2621"
@@ -89,7 +89,7 @@ def run_gui(host) -> None:
     samples: list[dict] = []
 
     comms = _text(comms_tab)
-    security = _text(security_tab)
+    security_state = _build_security(security_tab, host)
     wire = tk.Listbox(wire_tab, bg=SURFACE, fg=INK, selectbackground="#2f4038", highlightthickness=0, relief="flat", font=("Consolas", 10))
     wire.pack(fill="both", expand=True, padx=8, pady=(8, 4))
     hex_line = tk.StringVar(value="Select a frame to see the hex.")
@@ -104,17 +104,6 @@ def run_gui(host) -> None:
 
     wire.bind("<<ListboxSelect>>", on_wire)
 
-    security_actions = tk.Frame(security_tab, bg=BG)
-    security_actions.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-    sav2 = tk.Button(security_actions, text="SAv2", command=lambda: host.set_auth_version(2), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
-    sav5 = tk.Button(security_actions, text="SAv5", command=lambda: host.set_auth_version(5), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
-    sav_off = tk.Button(security_actions, text="Disable SAv", command=host.disable_auth, bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6)
-    sav2.pack(side="left", padx=(0, 6))
-    sav5.pack(side="left", padx=(0, 6))
-    sav_off.pack(side="left", padx=(0, 6))
-    tk.Button(security_actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
-    tk.Button(security_actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left")
-
     log_key: list[tuple] = [()]
 
     def refresh() -> None:
@@ -123,9 +112,6 @@ def run_gui(host) -> None:
         subtitle.set(f"{snap['name']} · address {snap['outstation']} · master {snap['master']} · port {snap['port']}")
         power.configure(text="Stop outstation" if snap["running"] else "Start outstation", bg=ALARM if snap["running"] else AMBER, fg="#1a100e")
         _lamp(lamp_widgets["TCP"], lamp_vars["TCP"], f"TCP {snap['clients']}" if snap["clients"] else f"TCP {snap['port']}", snap["running"] and not snap["error"], bool(snap["error"]))
-        choice = "off" if not sav["enabled"] else "2" if sav["version"] == 2 else "5"
-        for key, button in (("2", sav2), ("5", sav5), ("off", sav_off)):
-            button.configure(bg=AMBER if key == choice else SURFACE, fg="#1a140c" if key == choice else INK)
         _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], "SAv off" if not sav["enabled"] else sav["label"] if sav["status"] == KEY_OK else f"{sav['label']} fail" if sav["status"] == KEY_AUTH_FAIL else f"{sav['label']} init", sav["enabled"] and sav["status"] == KEY_OK, sav["enabled"] and sav["status"] == KEY_AUTH_FAIL)
         _lamp(lamp_widgets["Restart"], lamp_vars["Restart"], "Restart", snap["restart"], snap["restart"])
         _lamp(lamp_widgets["Time"], lamp_vars["Time"], "Time", snap["need_time"], snap["need_time"])
@@ -171,24 +157,7 @@ def run_gui(host) -> None:
             "",
             sav["result"],
         ])
-        _fill(security, [
-            f"Session     {'OFF' if not sav['enabled'] else sav['label'] + ' ' + _key_name(sav['status'])}",
-            f"MAC         {sav['mac_name']}",
-            f"Key wrap    {sav['wrap_name']}",
-            f"User        {sav['user']}",
-            f"KSQ         {sav['ksq']}",
-            f"Next CSQ    {sav['csq']}",
-            f"Accepted    {sav['ok']}",
-            f"Rejected    {sav['fail']}",
-            f"Aggressive  {'On' if sav['aggressive'] else 'Off'}",
-            "",
-            sav["result"],
-            "",
-            "Update key",
-            sav["key"],
-            "",
-            "HMAC matches the selected version. SAv2 is HMAC-SHA-1-8 and AES-128. SAv5 is HMAC-SHA-256-16 and AES-256.",
-        ])
+        _paint_security(security_state, snap)
         _sample(samples, snap)
         _draw_trend(trend, samples)
         selected = points.selection()
@@ -326,6 +295,217 @@ def _draw_trend(canvas: tk.Canvas, rows: list[dict]) -> None:
                 coords.extend((x, y_of(row[key])))
             if len(coords) >= 4:
                 canvas.create_line(*coords, fill=color, width=2, smooth=True)
+
+
+def _build_security(parent: tk.Frame, host) -> dict:
+    outer = tk.Frame(parent, bg=BG)
+    outer.pack(fill="both", expand=True)
+    canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+    scroll = ttk.Scrollbar(outer, command=canvas.yview)
+    canvas.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    form = tk.Frame(canvas, bg=BG)
+    window = canvas.create_window((0, 0), window=form, anchor="nw")
+    form.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+
+    enabled = tk.BooleanVar(value=True)
+    aggressive = tk.BooleanVar(value=False)
+    version = tk.StringVar(value="SAv5")
+    role = tk.StringVar(value="Operator")
+    user = tk.StringVar(value="1")
+    mac = tk.StringVar(value="HMAC-SHA-256-16")
+    wrap = tk.StringVar(value="AES-256")
+    key = tk.StringVar()
+    show_key = tk.BooleanVar(value=False)
+    challenge_ms = tk.StringVar(value="5000")
+    lifetime = tk.StringVar(value="3600")
+    notice = tk.StringVar()
+    gate = {"ready": False}
+    stats = {name: tk.StringVar(value="—") for name in ("session", "key_status", "ksq", "csq", "sent", "rx", "ok", "fail", "changes", "error", "last_user", "last_time")}
+    policy_vars = {}
+
+    def section(title: str) -> tk.Frame:
+        tk.Label(form, text=title, bg=BG, fg=AMBER, anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=16, pady=(14, 4))
+        body = tk.Frame(form, bg=BG)
+        body.pack(fill="x", padx=16)
+        return body
+
+    def row(body: tk.Frame, label: str, widget: tk.Widget) -> None:
+        line = tk.Frame(body, bg=BG)
+        line.pack(fill="x", pady=3)
+        tk.Label(line, text=label, bg=BG, fg=MUTED, width=28, anchor="w", font=("Segoe UI", 10)).pack(side="left")
+        widget.pack(side="left", fill="x", expand=True)
+
+    def check(body: tk.Frame, label: str, variable: tk.BooleanVar, command) -> None:
+        tk.Checkbutton(body, text=label, variable=variable, command=command, bg=BG, fg=INK, selectcolor=SURFACE, activebackground=BG, activeforeground=INK, anchor="w").pack(fill="x", pady=1)
+
+    auth = section("1  Secure authentication")
+    check(auth, "Enable secure authentication", enabled, lambda: host.set_flag("sav5", enabled.get()))
+    row(auth, "SA version", ttk.Combobox(auth, textvariable=version, values=("SAv2", "SAv5"), state="readonly", width=28))
+    def on_version(*_args) -> None:
+        if not gate["ready"]:
+            return
+        host.set_auth_version(2 if version.get() == "SAv2" else 5)
+        if version.get() == "SAv2":
+            mac.set("HMAC-SHA-1-8")
+            wrap.set("AES-128")
+        else:
+            mac.set("HMAC-SHA-256-16")
+            wrap.set("AES-256")
+
+    version.trace_add("write", on_version)
+    row(auth, "User number", ttk.Entry(auth, textvariable=user, width=30))
+    row(auth, "Role", ttk.Combobox(auth, textvariable=role, values=("Viewer", "Operator", "Engineer", "Installer", "SECADM"), state="readonly", width=28))
+
+    def on_role(*_args) -> None:
+        if not gate["ready"] or not role.get():
+            return
+        host.set_role(role.get())
+        spec = ROLES.get(role.get())
+        if spec:
+            user.set(str(spec[0]))
+
+    role.trace_add("write", on_role)
+    check(auth, "Aggressive mode", aggressive, lambda: host.set_flag("aggressive", aggressive.get()))
+
+    crypto = section("2  Cryptography")
+    mac_box = ttk.Combobox(crypto, textvariable=mac, values=("HMAC-SHA-1-8", "HMAC-SHA-256-16"), state="readonly", width=28)
+    wrap_box = ttk.Combobox(crypto, textvariable=wrap, values=("AES-128", "AES-256"), state="readonly", width=28)
+    row(crypto, "MAC algorithm", mac_box)
+    row(crypto, "Key wrap", wrap_box)
+    tk.Label(crypto, text="SA version selects the procedure. The MAC and key wrap must match that version.", bg=BG, fg=MUTED, anchor="w", font=("Segoe UI", 9)).pack(fill="x", pady=(4, 2))
+    key_entry = ttk.Entry(crypto, textvariable=key, show="*")
+    row(crypto, "Update key", key_entry)
+    buttons = tk.Frame(crypto, bg=BG)
+    buttons.pack(fill="x", pady=4)
+
+    def apply_algo(selected_mac: str, selected_wrap: str) -> None:
+        if not gate["ready"]:
+            return
+        pair = {"HMAC-SHA-1-8": 2, "AES-128": 2, "HMAC-SHA-256-16": 5, "AES-256": 5}
+        wanted = pair.get(selected_mac)
+        if wanted is None or pair.get(selected_wrap) != wanted:
+            notice.set("MAC and key wrap do not form an implemented pair. SAv2 is HMAC-SHA-1-8 + AES-128. SAv5 is HMAC-SHA-256-16 + AES-256.")
+            return
+        if (wanted == 5) != (version.get() == "SAv5"):
+            notice.set(f"That pair belongs to SAv{wanted}. Change SA version to SAv{wanted}. The version is not inferred from the algorithm.")
+            return
+        notice.set(f"SAv{wanted} procedures are active with {selected_mac} and {selected_wrap}.")
+
+    mac.trace_add("write", lambda *_args: apply_algo(mac.get(), wrap.get()))
+    wrap.trace_add("write", lambda *_args: apply_algo(mac.get(), wrap.get()))
+
+    def import_key() -> None:
+        notice.set(host.set_update_key(key.get()) or "Update key imported.")
+
+    def generate_key() -> None:
+        key.set(host.generate_update_key())
+        notice.set("New update key generated. Copy it into the master.")
+
+    def toggle_key() -> None:
+        key_entry.configure(show="" if show_key.get() else "*")
+
+    tk.Button(buttons, text="Generate key", command=generate_key, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
+    tk.Button(buttons, text="Import key", command=import_key, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
+    tk.Checkbutton(buttons, text="Show key", variable=show_key, command=toggle_key, bg=BG, fg=INK, selectcolor=SURFACE, activebackground=BG, activeforeground=INK).pack(side="left")
+
+    session = section("3  Session")
+    for label, name in (("Session status", "session"), ("Session key status", "key_status"), ("Key change sequence", "ksq"), ("Challenge sequence", "csq"), ("Session key lifetime", "lifetime_label"), ("Challenge timeout", "timeout_label")):
+        if name in ("lifetime_label", "timeout_label"):
+            continue
+        line = tk.Frame(session, bg=BG)
+        line.pack(fill="x", pady=2)
+        tk.Label(line, text=label, bg=BG, fg=MUTED, width=28, anchor="w").pack(side="left")
+        tk.Label(line, textvariable=stats[name], bg=BG, fg=INK, anchor="w", font=("Consolas", 10)).pack(side="left")
+    row(session, "Session key lifetime (s)", ttk.Entry(session, textvariable=lifetime, width=30))
+    row(session, "Challenge timeout (ms)", ttk.Entry(session, textvariable=challenge_ms, width=30))
+
+    def apply_limits(*_args) -> None:
+        if not gate["ready"]:
+            return
+        try:
+            host.set_auth_limits(int(challenge_ms.get()), int(lifetime.get()))
+        except ValueError:
+            notice.set("Lifetime and challenge timeout must be numbers.")
+
+    lifetime.trace_add("write", apply_limits)
+    challenge_ms.trace_add("write", apply_limits)
+
+    policy = section("4  Authentication policy")
+    boxes = (
+        ("controls", "Authenticate controls"),
+        ("crob", "Binary output / CROB"),
+        ("analog", "Analog output"),
+        ("direct_operate", "Direct operate"),
+        ("direct_operate_nr", "Direct operate no ack"),
+        ("select_operate", "Select before operate"),
+        ("cold_restart", "Cold restart"),
+        ("warm_restart", "Warm restart"),
+        ("time_write", "Time write"),
+        ("file_transfer", "File transfer"),
+    )
+    for name, label in boxes:
+        variable = tk.BooleanVar(value=name not in ("time_write", "file_transfer"))
+        policy_vars[name] = variable
+        check(policy, label, variable, lambda n=name, v=variable: host.set_policy(n, v.get()))
+
+    diag = section("5  Diagnostics")
+    for label, name in (
+        ("Challenges sent", "sent"),
+        ("Challenges received", "rx"),
+        ("Authentication accepted", "ok"),
+        ("Authentication rejected", "fail"),
+        ("Key changes", "changes"),
+        ("Last error", "error"),
+        ("Last authenticated user", "last_user"),
+        ("Last authentication time", "last_time"),
+    ):
+        line = tk.Frame(diag, bg=BG)
+        line.pack(fill="x", pady=2)
+        tk.Label(line, text=label, bg=BG, fg=MUTED, width=28, anchor="w").pack(side="left")
+        tk.Label(line, textvariable=stats[name], bg=BG, fg=INK, anchor="w", font=("Consolas", 10)).pack(side="left")
+    tk.Label(form, textvariable=notice, bg=BG, fg=AMBER, anchor="w", justify="left", wraplength=860, font=("Segoe UI", 10)).pack(fill="x", padx=16, pady=8)
+    actions = tk.Frame(form, bg=BG)
+    actions.pack(fill="x", padx=16, pady=(0, 16))
+    tk.Button(actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
+    tk.Button(actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left")
+    return {"enabled": enabled, "aggressive": aggressive, "version": version, "role": role, "user": user, "mac": mac, "wrap": wrap, "key": key, "lifetime": lifetime, "challenge_ms": challenge_ms, "notice": notice, "stats": stats, "policy": policy_vars, "gate": gate}
+
+
+def _paint_security(state: dict, snap: dict) -> None:
+    sav = snap["sav"]
+    if not state["gate"]["ready"]:
+        state["enabled"].set(sav["enabled"])
+        state["aggressive"].set(sav["aggressive"])
+        state["version"].set(sav["label"] if sav["version"] in (2, 5) else "SAv5")
+        state["role"].set(sav["role"])
+        state["user"].set(str(sav["user"]))
+        state["mac"].set(sav["mac_name"])
+        state["wrap"].set(sav["wrap_name"])
+        state["key"].set(sav["key"])
+        state["lifetime"].set(str(sav["session_lifetime_s"]))
+        state["challenge_ms"].set(str(sav["challenge_timeout_ms"]))
+        for name, variable in state["policy"].items():
+            variable.set(sav["policy"][name])
+        state["notice"].set(sav["result"])
+        state["gate"]["ready"] = True
+    status = "OFF" if not sav["enabled"] else "OK" if sav["status"] == KEY_OK else "AUTH_FAIL" if sav["status"] == KEY_AUTH_FAIL else "INVALID"
+    key_status = "OFF" if not sav["enabled"] else _key_name(sav["status"]) if sav["status"] == KEY_OK else "INVALID" if sav["status"] != KEY_AUTH_FAIL else "AUTH_FAIL"
+    state["stats"]["session"].set(status)
+    state["stats"]["key_status"].set(key_status)
+    state["stats"]["ksq"].set(str(sav["ksq"]))
+    state["stats"]["csq"].set(str(sav["csq"]))
+    state["stats"]["sent"].set(str(sav["challenges_sent"]))
+    state["stats"]["rx"].set(str(sav["challenges_rx"]))
+    state["stats"]["ok"].set(str(sav["ok"]))
+    state["stats"]["fail"].set(str(sav["fail"]))
+    state["stats"]["changes"].set(str(sav["key_changes"]))
+    state["stats"]["error"].set(sav["result"])
+    state["stats"]["last_user"].set(str(sav["last_user"] or "—"))
+    when = sav["last_auth_time"]
+    state["stats"]["last_time"].set(time.strftime("%H:%M:%S", time.localtime(when / 1000)) if when else "—")
 
 
 def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
