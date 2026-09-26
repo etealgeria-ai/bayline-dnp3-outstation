@@ -1,18 +1,12 @@
 # Bayline DNP3 outstation
 
-Python DNP3 outstation with SAv5. Listens on TCP port 20000.
+Python DNP3 outstation with a desktop window and SAv5. Listens on TCP port 20000.
 
 ```powershell
-pip install -r requirements.txt
-python outstation.py
+py -3.14 -m pip install -r requirements.txt
+py -3.14 outstation.py
 ```
 
-| Setting | Value |
-|---|---|
-| IP on this PC | `127.0.0.1` |
-| TCP port | `20000` |
-| Outstation address | `4` |
-| Master address | `100` |
-| SAv5 user | `1` |
+The window has Start / Stop, the point list, and the communication log. A master on this PC uses `127.0.0.1`, port `20000`, outstation address `4`.
 
-Zip of this branch: https://github.com/etealgeria-ai/bayline-dnp3-outstation/archive/refs/heads/main.zip
+`py -3.14 outstation.py --headless` listens without the window.
