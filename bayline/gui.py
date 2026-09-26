@@ -59,6 +59,7 @@ def run_gui(host) -> None:
     book = ttk.Notebook(root)
     book.pack(fill="both", expand=True, padx=16, pady=(0, 16))
     points_tab = _tab(book, "Points")
+    trend_tab = _tab(book, "Trend")
     comms_tab = _tab(book, "Comms")
     wire_tab = _tab(book, "Wire")
     security_tab = _tab(book, "Security")
@@ -82,6 +83,10 @@ def run_gui(host) -> None:
     tk.Button(manual, text="Write", command=lambda: _write(host, points, manual_entry, manual_error), bg=AMBER, fg="#1a140c", relief="flat", padx=12, pady=6).pack(side="left")
     tk.Button(manual, text="Release to random", command=lambda: _release(host, points), bg=SURFACE, fg=INK, relief="flat", padx=12, pady=6).pack(side="left", padx=(8, 0))
     tk.Label(manual, textvariable=manual_error, bg=BG, fg=ALARM, font=("Segoe UI", 10)).pack(side="left", padx=8)
+
+    trend = tk.Canvas(trend_tab, bg=BG, highlightthickness=0)
+    trend.pack(fill="both", expand=True)
+    samples: list[dict] = []
 
     comms = _text(comms_tab)
     security = _text(security_tab)
@@ -184,6 +189,8 @@ def run_gui(host) -> None:
             "",
             "HMAC matches the selected version. SAv2 is HMAC-SHA-1-8 and AES-128. SAv5 is HMAC-SHA-256-16 and AES-256.",
         ])
+        _sample(samples, snap)
+        _draw_trend(trend, samples)
         selected = points.selection()
         points.delete(*points.get_children())
         for kind, index, name, value, units, held in snap["points"]:
@@ -257,6 +264,68 @@ def _verdict(snap: dict) -> tuple[str, str]:
     if snap["quiet"] is not None and snap["quiet"] > 15000:
         return "Idle", f"Listening on port {snap['port']}. Nothing has been received for {round(snap['quiet'] / 1000)} seconds."
     return "Waiting", f"Listening on port {snap['port']}, address {snap['outstation']}. No TCP master is connected."
+
+
+def _sample(rows: list[dict], snap: dict) -> None:
+    values = {(kind, index): value for kind, index, _name, value, _units, _held in snap["points"]}
+    rows.append(values)
+    if len(rows) > 120:
+        del rows[:-120]
+
+
+def _draw_trend(canvas: tk.Canvas, rows: list[dict]) -> None:
+    canvas.delete("all")
+    width = max(canvas.winfo_width(), 480)
+    height = max(canvas.winfo_height(), 360)
+    bands = [
+        ("Voltage", [("ai", 0, "Bus", AMBER), ("ai", 10, "F1", "#7dcea0"), ("ai", 11, "F2", "#5dade2")], "kV"),
+        ("Current", [("ai", 1, "F1", ALARM), ("ai", 2, "F2", "#f0b27a")], "A"),
+        ("Frequency", [("ai", 5, "Hz", "#d7bde2")], "Hz"),
+        ("Load", [("ai", 7, "F1", "#82e0aa"), ("ai", 8, "F2", "#85c1e9")], "kW"),
+    ]
+    gap = 10
+    band_h = (height - gap * (len(bands) + 1)) / len(bands)
+    left, right = 64, 16
+    for index, (title, series, unit) in enumerate(bands):
+        top = gap + index * (band_h + gap)
+        bottom = top + band_h
+        canvas.create_rectangle(8, top, width - 8, bottom, outline=LINE, fill=SURFACE)
+        canvas.create_text(16, top + 14, text=title, fill=INK, anchor="w", font=("Segoe UI", 10))
+        plot_top = top + 28
+        plot_bottom = bottom - 18
+        plot_left = left
+        plot_right = width - right
+        present = [row[key] for row in rows for key, _label, _color in series if key in row]
+        if len(rows) < 2 or not present:
+            canvas.create_text(plot_left, (plot_top + plot_bottom) / 2, text="Waiting for samples", fill=MUTED, anchor="w", font=("Segoe UI", 9))
+            continue
+        low = min(present)
+        high = max(present)
+        if high - low < 0.05:
+            mid = (high + low) / 2
+            low, high = mid - 0.5, mid + 0.5
+        span = plot_right - plot_left
+        count = len(rows)
+
+        def y_of(value: float, lo: float = low, hi: float = high) -> float:
+            return plot_bottom - ((value - lo) / (hi - lo)) * (plot_bottom - plot_top)
+
+        canvas.create_text(plot_left - 8, plot_top, text=f"{high:,.2f}", fill=MUTED, anchor="e", font=("Consolas", 8))
+        canvas.create_text(plot_left - 8, plot_bottom, text=f"{low:,.2f}", fill=MUTED, anchor="e", font=("Consolas", 8))
+        legend_x = 120
+        for key, label, color in series:
+            latest = rows[-1].get(key)
+            caption = label if latest is None else f"{label} {latest:,.2f} {unit}"
+            canvas.create_text(legend_x, top + 14, text=caption, fill=color, anchor="w", font=("Consolas", 9))
+            legend_x += 150
+            coords = []
+            for step, row in enumerate(rows):
+                if key not in row:
+                    continue
+                x = plot_left + (step / max(1, count - 1)) * span
+                coords.extend((x, y_of(row[key])))
+            if len(coords) >= 4:
+                canvas.create_line(*coords, fill=color, width=2, smooth=True)
 
 
 def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
