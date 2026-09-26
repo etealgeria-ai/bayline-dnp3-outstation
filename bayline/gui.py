@@ -20,7 +20,7 @@ ALARM = "#e15b4a"
 
 def run_gui(host) -> None:
     root = tk.Tk()
-    root.title("DNP3 Outstation Simulator")
+    root.title("DNP3 Outstation Simulator - ETE.Algeria@gmail.com")
     root.geometry("1080x720")
     root.minsize(860, 560)
     root.configure(bg=BG)
