@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import socket
+import struct
 import threading
 
 from bayline.codec import (
     FC_AUTH_REQUEST,
+    FC_DIRECT_OPERATE,
     FC_OPERATE,
     FC_READ,
     FC_RESPONSE,
@@ -132,6 +134,11 @@ def operate(index: int, code: int) -> bytes:
     return bytes((0xC0, FC_OPERATE, 12, 1, 0x17, 1, index)) + body
 
 
+def analog_output(index: int, value: float) -> bytes:
+    body = struct.pack("<f", value) + bytes((0,))
+    return bytes((0xC0, FC_DIRECT_OPERATE, 41, 3, 0x17, 1, index)) + body
+
+
 def authed(station, apdu: bytes) -> None:
     outs = exchange(station, master(4, 100, apdu))
     check(len(outs) == 1, "expected a challenge")
@@ -164,6 +171,12 @@ def run() -> None:
     groups = {obj.group for obj in apdu.objects}
     check(1 in groups and 30 in groups, f"integrity groups {groups}")
 
+    varied = exchange(station, master(4, 100, bytes((0xC0, FC_READ, 1, 0, 6, 30, 0, 6))))
+    _, varied_apdu = app_of(varied[0])
+    found = {(obj.group, obj.variation) for obj in varied_apdu.objects}
+    check((1, 2) in found, f"01.00 did not return binary input with flags {found}")
+    check((30, 5) in found, f"30.00 did not return float analog input {found}")
+
     stranger = exchange(station, master(4, 77, bytes((0xC0, FC_READ, 60, 1, 6))))
     check(stranger == [], "a frame from a master address other than 100 was accepted")
 
@@ -175,6 +188,9 @@ def run() -> None:
     authed(station, operate(1, 0x81))
     feeder = find_point(station, "bi", 1)
     check(feeder is not None and feeder.value < 0.5, "feeder breaker did not open")
+    authed(station, analog_output(0, 12.47))
+    setpoint = find_point(station, "ao", 0)
+    check(setpoint is not None and abs(setpoint.value - 12.47) < 0.01, "41.03 float analog output was not written")
     kept = [event.id for event in station.events if event.kind == "bi"]
     check(kept, "the breaker event was not queued")
     for _ in range(100):

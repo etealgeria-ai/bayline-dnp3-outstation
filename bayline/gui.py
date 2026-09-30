@@ -65,7 +65,7 @@ def run_gui(host) -> None:
     security_tab = _tab(book, "Security")
 
     points = ttk.Treeview(points_tab, columns=("kind", "addr", "idx", "clazz", "name", "value"), show="headings")
-    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 address", 110), ("idx", "Index", 60), ("clazz", "Class", 60), ("name", "Point", 260), ("value", "Value", 160)):
+    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 object", 120), ("idx", "Index", 60), ("clazz", "Class", 60), ("name", "Point", 260), ("value", "Value", 160)):
         points.heading(key, text=title)
         points.column(key, width=width, anchor="w")
     points.pack(fill="both", expand=True, padx=8, pady=8)
@@ -142,6 +142,12 @@ def run_gui(host) -> None:
             f"Select armed     {armed}",
             f"Unsolicited      {unsol}",
             "",
+            "Master point map",
+            "Binary input          01.00   a variation 0 read returns 01.02 with flags",
+            "Control relay output  12.01   CROB, select or direct operate",
+            "Analog input          30.00   a variation 0 read returns 30.05 float",
+            "Analog output block   41.03   32-bit float",
+            "",
             "Secure session",
             f"Authentication   {'On' if sav['enabled'] else 'Off'}",
             f"Version          {sav['label']}",
@@ -164,7 +170,7 @@ def run_gui(host) -> None:
         points.delete(*points.get_children())
         for kind, index, name, value, units, held, clazz in snap["points"]:
             shown_value = _shown(kind, index, value, units, held)
-            address = f"{_group(kind)}:{index}"
+            address = f"{_object(kind)}:{index}"
             points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, clazz, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
@@ -536,8 +542,8 @@ def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
     return text
 
 
-def _group(kind: str) -> int:
-    return {"bi": 1, "bo": 10, "ctr": 20, "ai": 30, "ao": 40}.get(kind, 0)
+def _object(kind: str) -> str:
+    return {"bi": "01.00", "bo": "12.01", "ai": "30.00", "ao": "41.03", "ctr": "20.01"}.get(kind, "00.00")
 
 
 def _selected(points: ttk.Treeview) -> tuple[str, int] | None:
