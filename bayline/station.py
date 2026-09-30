@@ -163,7 +163,7 @@ class Sav5:
     session_lifetime_s: int = 3600
     max_key_status_requests: int = MAX_KEY_STATUS_REQUESTS
     max_auth_messages: int = 1000
-    max_error_messages: int = 5
+    max_error_messages: int = 20
     error_burst: int = 0
     allow_remote_update: bool = False
     ok_count: int = 0

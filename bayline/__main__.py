@@ -115,6 +115,7 @@ class Host:
             return
         self._server = server
         self.running = True
+        self.station.sav5.error_burst = 0
         self._note(f"Outstation started on {self.host}:{self.port}")
         where = self.key_file or "not saved"
         print(f"Update key file {where}", flush=True)
@@ -384,6 +385,8 @@ class Host:
             peer = f"{addr[0]}:{addr[1]}"
             self._note(f"Master connected {peer}")
             print(f"master connected {peer}", flush=True)
+            with self.lock:
+                self.station.sav5.error_burst = 0
             threading.Thread(target=self._client, args=(sock, peer), daemon=True).start()
 
     def _client(self, sock: socket.socket, peer: str) -> None:
