@@ -215,6 +215,7 @@ class LogItem:
 class Station:
     name: str = "Riverside 12 kV"
     location: str = "Riverside Substation"
+    model: str = "yard"
     outstation: int = 4
     master: int = 100
     link_reset: bool = False
@@ -299,60 +300,73 @@ def create_station() -> Station:
         _point("ao", 0, "Feeder 1 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
         _point("ao", 1, "Feeder 2 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
     ]
-    rows.extend(
-        _point("bi", index, name, value, "", 1, 0, 2, 2)
-        for index, name, value in (
-            (12, "DI_DET-FLT", 0),
-            (13, "DI_PV-AL1", 0),
-            (14, "DI_PV-AL2", 0),
-            (15, "DI_LBAT-AL", 0),
-            (16, "DI_ZSO-FLT", 0),
-            (17, "DI_ZSF-FLT", 0),
-            (18, "DI_REM-DI1", 0),
-            (19, "DI_REM-DI2", 0),
-            (30, "DI_PSU-CAB", 1),
-            (31, "DI_DS-CAB", 1),
-            (32, "DI_CPUL-STS", 1),
-            (33, "DI_CPUR-STS", 1),
-            (34, "DI_PLC-RUN-STS", 1),
-            (35, "DI_CPUBATTL-STS", 1),
-            (36, "DI_CPUBATTR-STS", 1),
-            (37, "DI_PSUL-STS", 1),
-            (38, "DI_PSUR-STS", 1),
-            (39, "DI_PSUL-DCRDYL-STS", 1),
-            (40, "DI_PSUL-ACRDYL-STS", 1),
-            (41, "DI_PSUL-ERDYL-STS", 1),
-            (42, "DI_PSUR-DCRDYR-STS", 1),
-            (43, "DI_PSUR-ACRDYR-STS", 1),
-            (44, "DI_PSUR-ERDYR-STS", 1),
-            (45, "DI_FCN1-FLT", 0),
-            (46, "DI_N1S5-IO-FLT", 0),
-            (47, "DI_N1S6-IO-FLT", 0),
-            (48, "DI_N1S7-IO-FLT", 0),
-            (49, "DI_N1S8-IO-FLT", 0),
-            (50, "DI_N1S9-IO-FLT", 0),
-            (51, "DI_N1S10-IO-FLT", 0),
-        )
-    )
-    rows.extend(
-        _point("bo", index, name, 0, "", 0, 0, 2, 2)
-        for index, name in ((16, "AI_RESET"), (17, "AI_RESET"))
-    )
-    rows.extend(
-        _point("ai", index, name, value, units, 2, deadband, 5, 5)
-        for index, name, value, units, deadband in (
-            (15, "AI_TT-CAB", 32.0, "°C", 0.5),
-            (20, "AI_CM", 1.0, "", 0.1),
-            (21, "AI_OF", 0.0, "", 0.1),
-            (22, "AI_HR", 128.4, "h", 0.05),
-            (23, "AI_SEC", 0.0, "s", 10),
-            (24, "AI_CPU-CAP", 86.0, "%", 1),
-            (25, "AI_CPU-TEMP", 42.5, "°C", 0.5),
-        )
-    )
-    order = {"bi": 0, "bo": 1, "ai": 2, "ctr": 3, "ao": 4}
-    rows.sort(key=lambda point: (order[point.kind], point.index))
     station = Station(points=rows)
+    station.security[17] = 1
+    station.security_sent[17] = 1
+    return station
+
+
+def create_rtu_station() -> Station:
+    """The second outstation: the uploaded point list, including the indexes the yard already uses."""
+    binary = (
+        (0, "DI_ZSO", 0),
+        (1, "DI_ZSF", 1),
+        (2, "DI_LSL", 0),
+        (10, "DI_DET-CN1", 0),
+        (11, "DI_DET-CN2", 0),
+        (12, "DI_DET-FLT", 0),
+        (13, "DI_PV-AL1", 0),
+        (14, "DI_PV-AL2", 0),
+        (15, "DI_LBAT-AL", 0),
+        (16, "DI_ZSO-FLT", 0),
+        (17, "DI_ZSF-FLT", 0),
+        (18, "DI_REM-DI1", 0),
+        (19, "DI_REM-DI2", 0),
+        (30, "DI_PSU-CAB", 1),
+        (31, "DI_DS-CAB", 1),
+        (32, "DI_CPUL-STS", 1),
+        (33, "DI_CPUR-STS", 1),
+        (34, "DI_PLC-RUN-STS", 1),
+        (35, "DI_CPUBATTL-STS", 1),
+        (36, "DI_CPUBATTR-STS", 1),
+        (37, "DI_PSUL-STS", 1),
+        (38, "DI_PSUR-STS", 1),
+        (39, "DI_PSUL-DCRDYL-STS", 1),
+        (40, "DI_PSUL-ACRDYL-STS", 1),
+        (41, "DI_PSUL-ERDYL-STS", 1),
+        (42, "DI_PSUR-DCRDYR-STS", 1),
+        (43, "DI_PSUR-ACRDYR-STS", 1),
+        (44, "DI_PSUR-ERDYR-STS", 1),
+        (45, "DI_FCN1-FLT", 0),
+        (46, "DI_N1S5-IO-FLT", 0),
+        (47, "DI_N1S6-IO-FLT", 0),
+        (48, "DI_N1S7-IO-FLT", 0),
+        (49, "DI_N1S8-IO-FLT", 0),
+        (50, "DI_N1S9-IO-FLT", 0),
+        (51, "DI_N1S10-IO-FLT", 0),
+    )
+    analogs = (
+        (0, "AI_PT", 1.05, "", 0.05),
+        (1, "AI_PA1", 2.10, "", 0.05),
+        (2, "AI_PA2", 2.05, "", 0.05),
+        (3, "AI_PA3", 1.98, "", 0.05),
+        (4, "AI_PL", 45.0, "", 0.5),
+        (5, "AI_TT", 36.5, "°C", 0.5),
+        (6, "AI_PD", 0.35, "", 0.02),
+        (7, "AI_LT", 62.0, "", 0.5),
+        (15, "AI_TT-CAB", 32.0, "°C", 0.5),
+        (20, "AI_CM", 1.0, "", 0.1),
+        (21, "AI_OF", 0.0, "", 0.1),
+        (22, "AI_HR", 128.4, "h", 0.05),
+        (23, "AI_SEC", 0.0, "s", 10),
+        (24, "AI_CPU-CAP", 86.0, "%", 1),
+        (25, "AI_CPU-TEMP", 42.5, "°C", 0.5),
+    )
+    rows = [_point("bi", index, name, value, "", 1, 0, 2, 2) for index, name, value in binary]
+    rows.extend(_point("bo", index, name, 0, "", 0, 0, 2, 2) for index, name in ((0, "DO_EV"), (1, "DO_SR"), (2, "DO_WB"), (16, "AI_RESET"), (17, "AI_RESET")))
+    rows.extend(_point("ai", index, name, value, units, 2, deadband, 5, 5) for index, name, value, units, deadband in analogs)
+    rows.extend(_point("ao", index, name, 0, "", 0, 0.01, 3, 5) for index, name in ((0, "AO_CHECK"), (1, "AO_CHECK2")))
+    station = Station(name="RTU", location="RTU", model="rtu", outstation=5, points=rows)
     station.security[17] = 1
     station.security_sent[17] = 1
     return station

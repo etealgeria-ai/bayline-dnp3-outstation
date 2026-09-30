@@ -12,7 +12,7 @@ from bayline.codec import frame_size
 from bayline.outstation import flush_unsolicited, handle_frame, housekeep, write_point
 from bayline.sim import simulate
 from bayline.crypto import hex_to_bytes
-from bayline.station import ROLES, LogItem, auth_profile, create_station, find_point, reset_session_keys, update_key_material
+from bayline.station import ROLES, LogItem, auth_profile, create_rtu_station, create_station, find_point, reset_session_keys, update_key_material
 
 HOST = "0.0.0.0"
 DEFAULT_PORT = 20000
@@ -83,10 +83,10 @@ def _take(buf: bytearray) -> list[bytes]:
 class Host:
     """Outstation plus the TCP listener. Safe to start and stop from the window."""
 
-    def __init__(self, port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "") -> None:
+    def __init__(self, port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "", station=None) -> None:
         self.port = port
         self.host = host or HOST
-        self.station = create_station()
+        self.station = station or create_station()
         key, path = load_update_key(update_key, key_file)
         self.station.sav5.update_key = key
         self.key_file = path
@@ -124,7 +124,7 @@ class Host:
             threading.Thread(target=self._tick, daemon=True).start()
         self._accept_thread = threading.Thread(target=self._accept, daemon=True)
         self._accept_thread.start()
-        print(f"Bayline DNP3 outstation listening on {self.host}:{self.port}  address {self.station.outstation}  SAv5 user 1", flush=True)
+        print(f"{self.station.name} listening on {self.host}:{self.port}  address {self.station.outstation}  SAv5 user 1", flush=True)
 
     def stop(self) -> None:
         if not self.running and self._server is None:
@@ -161,6 +161,7 @@ class Host:
             profile = auth_profile(sav)
             return {
                 "name": station.name,
+                "model": station.model,
                 "outstation": station.outstation,
                 "master": station.master,
                 "link": station.link_reset,
@@ -412,6 +413,14 @@ class Host:
             print(f"master disconnected {peer}", flush=True)
 
 
+def open_hosts(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "", rtu_port: int = 0, rtu_address: int = 5) -> list[Host]:
+    yard = Host(port, host, allow_ips, update_key, key_file or DEFAULT_KEY_FILE, create_station())
+    rtu = create_rtu_station()
+    rtu.outstation = rtu_address
+    second = Host(rtu_port or port + 1, host, allow_ips, update_key, "bayline-rtu-update-key.hex", rtu)
+    return [yard, second]
+
+
 def serve(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | None = None, update_key: str = "", key_file: str = "") -> None:
     listener = Host(port, host, allow_ips, update_key, key_file)
     listener.start()
@@ -427,18 +436,30 @@ def serve(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] | Non
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bayline DNP3/TCP outstation")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--rtu-port", type=int, default=0, help="Second outstation port. Defaults to the first port plus 1.")
+    parser.add_argument("--rtu-address", type=int, default=5, help="DNP3 address of the second outstation.")
     parser.add_argument("--host", default=HOST, help="Bind address. Use 0.0.0.0 so a master on the LAN can connect.")
     parser.add_argument("--allow-ip", action="append", default=[], help="Accept this client IP. Repeat for more than one. Omit to accept any IP.")
     parser.add_argument("--update-key", default="", help="32-octet update key as hex. Also read from BAYLINE_UPDATE_KEY.")
     parser.add_argument("--update-key-file", default="", help="File that stores the update key. Defaults to bayline-update-key.hex.")
     parser.add_argument("--headless", action="store_true", help="Listen without opening the window")
     args = parser.parse_args()
+    hosts = open_hosts(args.port, args.host, args.allow_ip, args.update_key, args.update_key_file, args.rtu_port, args.rtu_address)
     if args.headless:
-        serve(args.port, args.host, args.allow_ip, args.update_key, args.update_key_file)
+        for item in hosts:
+            item.start()
+            if item.error:
+                raise SystemExit(item.error)
+        try:
+            while any(item.running for item in hosts):
+                time.sleep(0.4)
+        except KeyboardInterrupt:
+            for item in hosts:
+                item.stop()
         return
     from bayline.gui import run_gui
 
-    run_gui(Host(args.port, args.host, args.allow_ip, args.update_key, args.update_key_file))
+    run_gui(hosts)
 
 
 if __name__ == "__main__":

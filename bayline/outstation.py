@@ -551,10 +551,10 @@ def _execute(station: Station, group: int, variation: int, index: int, raw: byte
     value = read_i16(raw, 0) if variation == 2 else read_f32(raw, 0) if variation == 3 else read_i32(raw, 0)
     if value != value:
         return 3
-    if value < 10.5 or value > 14.4:
+    if ao.units == "kV" and (value < 10.5 or value > 14.4):
         return 12
     write_point(station, ao, value, ao.flags, now, "control")
-    measured = find_point(station, "ai", 10 + index) if index in (0, 1) else None
+    measured = find_point(station, "ai", 10 + index) if ao.units == "kV" and index in (0, 1) else None
     if measured:
         measured.manual = False
     return 0

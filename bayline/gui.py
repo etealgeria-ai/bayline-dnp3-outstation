@@ -19,6 +19,12 @@ ALARM = "#e15b4a"
 
 
 def run_gui(host) -> None:
+    hosts = list(host) if isinstance(host, (list, tuple)) else [host]
+    active = {"host": hosts[0]}
+
+    def current():
+        return active["host"]
+
     root = tk.Tk()
     root.title("DNP3 Outstation Simulator - ETE.Algeria@gmail.com")
     root.geometry("1080x720")
@@ -53,8 +59,12 @@ def run_gui(host) -> None:
 
     actions = tk.Frame(root, bg=BG)
     actions.pack(fill="x", padx=16, pady=8)
-    power = tk.Button(actions, command=lambda: _toggle(host), bg=ALARM, fg="#1a100e", relief="flat", padx=14, pady=8, font=("Segoe UI", 10, "bold"))
+    power = tk.Button(actions, command=lambda: _toggle_all(hosts), bg=ALARM, fg="#1a100e", relief="flat", padx=14, pady=8, font=("Segoe UI", 10, "bold"))
     power.pack(side="left")
+    labels = [f"{item.station.name}   addr {item.station.outstation}   port {item.port}" for item in hosts]
+    picked = tk.StringVar(value=labels[0])
+    if len(hosts) > 1:
+        ttk.Combobox(actions, textvariable=picked, values=labels, state="readonly", width=42).pack(side="left", padx=(12, 0))
 
     book = ttk.Notebook(root)
     book.pack(fill="both", expand=True, padx=16, pady=(0, 16))
@@ -72,16 +82,16 @@ def run_gui(host) -> None:
     point_actions = tk.Frame(points_tab, bg=BG)
     point_actions.pack(fill="x", padx=8, pady=(0, 8))
     for index, title in ((0, "52-T1"), (1, "52-F1"), (2, "52-F2")):
-        tk.Button(point_actions, text=f"Trip {title}", command=lambda i=index: _breaker(host, i, 0), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
-        tk.Button(point_actions, text=f"Close {title}", command=lambda i=index: _breaker(host, i, 1), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 12))
+        tk.Button(point_actions, text=f"Trip {title}", command=lambda i=index: _breaker(current(), i, 0), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 6))
+        tk.Button(point_actions, text=f"Close {title}", command=lambda i=index: _breaker(current(), i, 1), bg=SURFACE, fg=INK, relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 12))
     manual = tk.Frame(points_tab, bg=BG)
     manual.pack(fill="x", padx=8, pady=(0, 8))
     tk.Label(manual, text="Manual value", bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(side="left")
     manual_entry = tk.Entry(manual, width=16, bg=SURFACE, fg=INK, insertbackground=INK, relief="flat", font=("Consolas", 11))
     manual_entry.pack(side="left", padx=8)
     manual_error = tk.StringVar()
-    tk.Button(manual, text="Write", command=lambda: _write(host, points, manual_entry, manual_error), bg=AMBER, fg="#1a140c", relief="flat", padx=12, pady=6).pack(side="left")
-    tk.Button(manual, text="Release to random", command=lambda: _release(host, points), bg=SURFACE, fg=INK, relief="flat", padx=12, pady=6).pack(side="left", padx=(8, 0))
+    tk.Button(manual, text="Write", command=lambda: _write(current(), points, manual_entry, manual_error), bg=AMBER, fg="#1a140c", relief="flat", padx=12, pady=6).pack(side="left")
+    tk.Button(manual, text="Release to random", command=lambda: _release(current(), points), bg=SURFACE, fg=INK, relief="flat", padx=12, pady=6).pack(side="left", padx=(8, 0))
     tk.Label(manual, textvariable=manual_error, bg=BG, fg=ALARM, font=("Segoe UI", 10)).pack(side="left", padx=8)
 
     trend = tk.Canvas(trend_tab, bg=BG, highlightthickness=0)
@@ -89,7 +99,7 @@ def run_gui(host) -> None:
     samples: list[dict] = []
 
     comms = _text(comms_tab)
-    security_state = _build_security(security_tab, host)
+    security_state = _build_security(security_tab, current)
     wire = tk.Listbox(wire_tab, bg=SURFACE, fg=INK, selectbackground="#2f4038", highlightthickness=0, relief="flat", font=("Consolas", 10))
     wire.pack(fill="both", expand=True, padx=8, pady=(8, 4))
     hex_line = tk.StringVar(value="Select a frame to see the hex.")
@@ -106,11 +116,32 @@ def run_gui(host) -> None:
 
     log_key: list[tuple] = [()]
 
+    def on_pick(*_args) -> None:
+        try:
+            active["host"] = hosts[labels.index(picked.get())]
+        except ValueError:
+            return
+        security_state["gate"]["ready"] = False
+        samples.clear()
+        log_key[0] = ()
+
+    picked.trace_add("write", on_pick)
+    yard_buttons = {"shown": True}
+
     def refresh() -> None:
-        snap = host.snapshot()
+        snap = current().snapshot()
+        others = [item.snapshot() for item in hosts]
         sav = snap["sav"]
         subtitle.set(f"{snap['name']} · address {snap['outstation']} · master {snap['master']} · port {snap['port']}")
-        power.configure(text="Stop outstation" if snap["running"] else "Start outstation", bg=ALARM if snap["running"] else AMBER, fg="#1a100e")
+        running = any(item["running"] for item in others)
+        power.configure(text="Stop outstations" if running else "Start outstations", bg=ALARM if running else AMBER, fg="#1a100e")
+        show_yard = snap.get("model") == "yard"
+        if yard_buttons["shown"] != show_yard:
+            if show_yard:
+                point_actions.pack(fill="x", padx=8, pady=(0, 8), before=manual)
+            else:
+                point_actions.pack_forget()
+            yard_buttons["shown"] = show_yard
         _lamp(lamp_widgets["TCP"], lamp_vars["TCP"], f"TCP {snap['clients']}" if snap["clients"] else f"TCP {snap['port']}", snap["running"] and not snap["error"], bool(snap["error"]))
         _lamp(lamp_widgets["SAv5"], lamp_vars["SAv5"], "SAv off" if not sav["enabled"] else sav["label"] if sav["status"] == KEY_OK else f"{sav['label']} fail" if sav["status"] == KEY_AUTH_FAIL else f"{sav['label']} init", sav["enabled"] and sav["status"] == KEY_OK, sav["enabled"] and sav["status"] == KEY_AUTH_FAIL)
         _lamp(lamp_widgets["Restart"], lamp_vars["Restart"], "Restart", snap["restart"], snap["restart"])
@@ -124,11 +155,17 @@ def run_gui(host) -> None:
         confirm = "None" if snap["confirm"] is None else f"Seq {snap['confirm']['seq']} · {snap['confirm']['left']} s"
         armed = "None" if snap["select"] is None else f"g{snap['select']['group']} · {snap['select']['index']} · {snap['select']['left']} s"
         quiet = "None" if snap["quiet"] is None else "Just now" if snap["quiet"] < 1500 else f"{round(snap['quiet'] / 1000)} s ago"
+        listeners = [
+            f"{item['name']:<16} addr {item['outstation']:<4} port {item['port']:<5} {'Up' if item['running'] else 'Down'}{'   viewing' if item['port'] == snap['port'] and item['outstation'] == snap['outstation'] else ''}"
+            for item in others
+        ]
         _fill(comms, [
             verdict,
             detail,
             "",
-            f"TCP listener     {'Up · port ' + str(snap['port']) if snap['running'] else 'Down'}",
+            "Both outstations",
+            *listeners,
+            "",
             f"TCP clients      {snap['error'] or snap['clients']}",
             "Station owner    This PC",
             f"Outstation       {snap['outstation']}",
@@ -165,7 +202,7 @@ def run_gui(host) -> None:
         ])
         _paint_security(security_state, snap)
         _sample(samples, snap)
-        _draw_trend(trend, samples)
+        _draw_trend(trend, samples, snap.get("model", "yard"))
         selected = points.selection()
         points.delete(*points.get_children())
         for kind, index, name, value, units, held, clazz in snap["points"]:
@@ -186,13 +223,14 @@ def run_gui(host) -> None:
                 if not ok:
                     wire.itemconfig("end", fg=ALARM)
             if not snap["log"]:
-                wire.insert("end", "No frames yet. Connect a master on port 20000.")
+                wire.insert("end", f"No frames yet. Connect a master on port {snap['port']}.")
             wire.yview_moveto(1)
         root.after(500, refresh)
 
-    host.start()
+    for item in hosts:
+        item.start()
     refresh()
-    root.protocol("WM_DELETE_WINDOW", lambda: (_shutdown(host), root.destroy()))
+    root.protocol("WM_DELETE_WINDOW", lambda: (_shutdown_all(hosts), root.destroy()))
     root.mainloop()
 
 
@@ -247,16 +285,24 @@ def _sample(rows: list[dict], snap: dict) -> None:
         del rows[:-120]
 
 
-def _draw_trend(canvas: tk.Canvas, rows: list[dict]) -> None:
+def _draw_trend(canvas: tk.Canvas, rows: list[dict], model: str = "yard") -> None:
     canvas.delete("all")
     width = max(canvas.winfo_width(), 480)
     height = max(canvas.winfo_height(), 360)
-    bands = [
-        ("Voltage", [(("ai", 0), "Bus", AMBER), (("ai", 10), "F1", "#7dcea0"), (("ai", 11), "F2", "#5dade2")], "kV"),
-        ("Current", [(("ai", 1), "F1", ALARM), (("ai", 2), "F2", "#f0b27a")], "A"),
-        ("Frequency", [(("ai", 5), "Hz", "#d7bde2")], "Hz"),
-        ("Load", [(("ai", 7), "F1", "#82e0aa"), (("ai", 8), "F2", "#85c1e9")], "kW"),
-    ]
+    if model == "rtu":
+        bands = [
+            ("Analogs", [(("ai", 0), "PT", AMBER), (("ai", 1), "PA1", "#7dcea0"), (("ai", 5), "TT", "#5dade2")], ""),
+            ("Cabinet", [(("ai", 15), "CAB", "#f0b27a"), (("ai", 25), "CPU", ALARM)], "°C"),
+            ("CPU capacity", [(("ai", 24), "CAP", "#82e0aa")], "%"),
+            ("Seconds", [(("ai", 23), "SEC", "#d7bde2")], "s"),
+        ]
+    else:
+        bands = [
+            ("Voltage", [(("ai", 0), "Bus", AMBER), (("ai", 10), "F1", "#7dcea0"), (("ai", 11), "F2", "#5dade2")], "kV"),
+            ("Current", [(("ai", 1), "F1", ALARM), (("ai", 2), "F2", "#f0b27a")], "A"),
+            ("Frequency", [(("ai", 5), "Hz", "#d7bde2")], "Hz"),
+            ("Load", [(("ai", 7), "F1", "#82e0aa"), (("ai", 8), "F2", "#85c1e9")], "kW"),
+        ]
     gap = 10
     band_h = (height - gap * (len(bands) + 1)) / len(bands)
     left, right = 64, 16
@@ -302,7 +348,9 @@ def _draw_trend(canvas: tk.Canvas, rows: list[dict]) -> None:
                 canvas.create_line(*coords, fill=color, width=2, smooth=True)
 
 
-def _build_security(parent: tk.Frame, host) -> dict:
+def _build_security(parent: tk.Frame, host_of) -> dict:
+    def host():
+        return host_of() if callable(host_of) else host_of
     outer = tk.Frame(parent, bg=BG)
     outer.pack(fill="both", expand=True)
     canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
@@ -349,12 +397,12 @@ def _build_security(parent: tk.Frame, host) -> dict:
         return box
 
     auth = section("1  Secure authentication")
-    check(auth, "Enable secure authentication", enabled, lambda: host.set_flag("sav5", enabled.get()))
+    check(auth, "Enable secure authentication", enabled, lambda: host().set_flag("sav5", enabled.get()))
     row(auth, "SA version", ttk.Combobox(auth, textvariable=version, values=("SAv2", "SAv5"), state="readonly", width=28))
     def on_version(*_args) -> None:
         if not gate["ready"]:
             return
-        host.set_auth_version(2 if version.get() == "SAv2" else 5)
+        host().set_auth_version(2 if version.get() == "SAv2" else 5)
         if version.get() == "SAv2":
             mac.set("HMAC-SHA-1-8")
             wrap.set("AES-128")
@@ -369,13 +417,13 @@ def _build_security(parent: tk.Frame, host) -> dict:
     def on_role(*_args) -> None:
         if not gate["ready"] or not role.get():
             return
-        host.set_role(role.get())
+        host().set_role(role.get())
         spec = ROLES.get(role.get())
         if spec:
             user.set(str(spec[0]))
 
     role.trace_add("write", on_role)
-    check(auth, "Aggressive mode", aggressive, lambda: host.set_flag("aggressive", aggressive.get()))
+    check(auth, "Aggressive mode", aggressive, lambda: host().set_flag("aggressive", aggressive.get()))
 
     crypto = section("2  Cryptography")
     mac_box = ttk.Combobox(crypto, textvariable=mac, values=("HMAC-SHA-1-8", "HMAC-SHA-256-16"), state="readonly", width=28)
@@ -405,10 +453,10 @@ def _build_security(parent: tk.Frame, host) -> dict:
     wrap.trace_add("write", lambda *_args: apply_algo(mac.get(), wrap.get()))
 
     def import_key() -> None:
-        notice.set(host.set_update_key(key.get()) or "Update key imported.")
+        notice.set(host().set_update_key(key.get()) or "Update key imported.")
 
     def generate_key() -> None:
-        key.set(host.generate_update_key())
+        key.set(host().generate_update_key())
         notice.set("New update key generated. Copy it into the master.")
 
     def toggle_key() -> None:
@@ -433,7 +481,7 @@ def _build_security(parent: tk.Frame, host) -> dict:
         if not gate["ready"]:
             return
         try:
-            host.set_auth_limits(int(challenge_ms.get()), int(lifetime.get()))
+            host().set_auth_limits(int(challenge_ms.get()), int(lifetime.get()))
         except ValueError:
             notice.set("Lifetime and challenge timeout must be numbers.")
 
@@ -459,7 +507,7 @@ def _build_security(parent: tk.Frame, host) -> dict:
     for name, label in boxes:
         variable = tk.BooleanVar(value=name != "time_write")
         policy_vars[name] = variable
-        box = check(policy, label, variable, lambda n=name, v=variable: host.set_policy(n, v.get()))
+        box = check(policy, label, variable, lambda n=name, v=variable: host().set_policy(n, v.get()))
         if name != "time_write":
             box.configure(state="disabled")
 
@@ -481,8 +529,8 @@ def _build_security(parent: tk.Frame, host) -> dict:
     tk.Label(form, textvariable=notice, bg=BG, fg=AMBER, anchor="w", justify="left", wraplength=860, font=("Segoe UI", 10)).pack(fill="x", padx=16, pady=8)
     actions = tk.Frame(form, bg=BG)
     actions.pack(fill="x", padx=16, pady=(0, 16))
-    tk.Button(actions, text="Remote / local", command=lambda: host.set_flag("local", not host.snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
-    tk.Button(actions, text="Yard run / hold", command=lambda: host.set_flag("sim", not host.snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left")
+    tk.Button(actions, text="Remote / local", command=lambda: host().set_flag("local", not host().snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
+    tk.Button(actions, text="Yard run / hold", command=lambda: host().set_flag("sim", not host().snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left")
     return {"enabled": enabled, "aggressive": aggressive, "version": version, "role": role, "user": user, "mac": mac, "wrap": wrap, "key": key, "lifetime": lifetime, "challenge_ms": challenge_ms, "notice": notice, "stats": stats, "policy": policy_vars, "gate": gate}
 
 
@@ -525,7 +573,9 @@ def _shown(kind: str, index: int, name: str, value: float, units: str, held: boo
         text = "Latched" if value >= 0.5 else "Dropped"
     elif kind == "bi":
         label = name.upper()
-        if "FLT" in label or "-AL" in label:
+        if "ZSO" in label or "ZSF" in label:
+            text = "On" if value >= 0.5 else "Off"
+        elif "FLT" in label or "-AL" in label:
             text = "Alarm" if value >= 0.5 else "Normal"
         elif any(token in label for token in ("STS", "RDY", "RUN", "CAB", "REM-DI")):
             text = "On" if value >= 0.5 else "Off"
@@ -573,11 +623,18 @@ def _release(host, points: ttk.Treeview) -> None:
         host.release_point(chosen[0], chosen[1])
 
 
-def _toggle(host) -> None:
-    if host.running:
-        host.stop()
+def _toggle_all(group) -> None:
+    if any(item.running for item in group):
+        for item in group:
+            item.stop()
     else:
-        host.start()
+        for item in group:
+            item.start()
+
+
+def _shutdown_all(group) -> None:
+    for item in group:
+        item.stop()
 
 
 def _breaker(host, index: int, closed: int) -> None:

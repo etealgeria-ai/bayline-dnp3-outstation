@@ -15,6 +15,9 @@ def simulate(station: Station, now: int, dt_sec: float) -> None:
     if not station.sim_on:
         return
     dt = min(2.0, max(0.05, dt_sec))
+    if station.model == "rtu":
+        _drift_rtu(station, now, dt)
+        return
     t1 = _on(station, 0)
     f1 = _on(station, 1) and t1
     f2 = _on(station, 2) and t1
@@ -47,13 +50,11 @@ def simulate(station: Station, now: int, dt_sec: float) -> None:
         counter = find_point(station, "ctr", counter_index)
         if load and counter and not counter.manual:
             write_point(station, counter, counter.value + (load.value * dt * station.energy_scale) / 3600, counter.flags, now, "sim")
-    _drift_extra(station, now, dt)
 
 
-def _drift_extra(station: Station, now: int, dt: float) -> None:
-    yard = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+def _drift_rtu(station: Station, now: int, dt: float) -> None:
     for point in station.points:
-        if point.kind != "ai" or point.index in yard or point.manual:
+        if point.kind != "ai" or point.manual:
             continue
         if point.index == 23:
             nxt = point.value + dt
