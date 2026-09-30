@@ -47,6 +47,21 @@ def simulate(station: Station, now: int, dt_sec: float) -> None:
         counter = find_point(station, "ctr", counter_index)
         if load and counter and not counter.manual:
             write_point(station, counter, counter.value + (load.value * dt * station.energy_scale) / 3600, counter.flags, now, "sim")
+    _drift_extra(station, now, dt)
+
+
+def _drift_extra(station: Station, now: int, dt: float) -> None:
+    yard = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+    for point in station.points:
+        if point.kind != "ai" or point.index in yard or point.manual:
+            continue
+        if point.index == 23:
+            nxt = point.value + dt
+        elif point.index == 22:
+            nxt = point.value + dt / 3600
+        else:
+            nxt = point.value + (random.random() - 0.5) * 0.04
+        write_point(station, point, nxt, point.flags, now, "sim")
 
 
 def _ease(station: Station, index: int, target: float, jitter: float, now: int) -> None:

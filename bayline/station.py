@@ -299,6 +299,59 @@ def create_station() -> Station:
         _point("ao", 0, "Feeder 1 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
         _point("ao", 1, "Feeder 2 regulator setpoint", 12.47, "kV", 0, 0.01, 3, 5),
     ]
+    rows.extend(
+        _point("bi", index, name, value, "", 1, 0, 2, 2)
+        for index, name, value in (
+            (12, "DI_DET-FLT", 0),
+            (13, "DI_PV-AL1", 0),
+            (14, "DI_PV-AL2", 0),
+            (15, "DI_LBAT-AL", 0),
+            (16, "DI_ZSO-FLT", 0),
+            (17, "DI_ZSF-FLT", 0),
+            (18, "DI_REM-DI1", 0),
+            (19, "DI_REM-DI2", 0),
+            (30, "DI_PSU-CAB", 1),
+            (31, "DI_DS-CAB", 1),
+            (32, "DI_CPUL-STS", 1),
+            (33, "DI_CPUR-STS", 1),
+            (34, "DI_PLC-RUN-STS", 1),
+            (35, "DI_CPUBATTL-STS", 1),
+            (36, "DI_CPUBATTR-STS", 1),
+            (37, "DI_PSUL-STS", 1),
+            (38, "DI_PSUR-STS", 1),
+            (39, "DI_PSUL-DCRDYL-STS", 1),
+            (40, "DI_PSUL-ACRDYL-STS", 1),
+            (41, "DI_PSUL-ERDYL-STS", 1),
+            (42, "DI_PSUR-DCRDYR-STS", 1),
+            (43, "DI_PSUR-ACRDYR-STS", 1),
+            (44, "DI_PSUR-ERDYR-STS", 1),
+            (45, "DI_FCN1-FLT", 0),
+            (46, "DI_N1S5-IO-FLT", 0),
+            (47, "DI_N1S6-IO-FLT", 0),
+            (48, "DI_N1S7-IO-FLT", 0),
+            (49, "DI_N1S8-IO-FLT", 0),
+            (50, "DI_N1S9-IO-FLT", 0),
+            (51, "DI_N1S10-IO-FLT", 0),
+        )
+    )
+    rows.extend(
+        _point("bo", index, name, 0, "", 0, 0, 2, 2)
+        for index, name in ((16, "AI_RESET"), (17, "AI_RESET"))
+    )
+    rows.extend(
+        _point("ai", index, name, value, units, 2, deadband, 5, 5)
+        for index, name, value, units, deadband in (
+            (15, "AI_TT-CAB", 32.0, "°C", 0.5),
+            (20, "AI_CM", 1.0, "", 0.1),
+            (21, "AI_OF", 0.0, "", 0.1),
+            (22, "AI_HR", 128.4, "h", 0.05),
+            (23, "AI_SEC", 0.0, "s", 10),
+            (24, "AI_CPU-CAP", 86.0, "%", 1),
+            (25, "AI_CPU-TEMP", 42.5, "°C", 0.5),
+        )
+    )
+    order = {"bi": 0, "bo": 1, "ai": 2, "ctr": 3, "ao": 4}
+    rows.sort(key=lambda point: (order[point.kind], point.index))
     station = Station(points=rows)
     station.security[17] = 1
     station.security_sent[17] = 1

@@ -169,7 +169,7 @@ def run_gui(host) -> None:
         selected = points.selection()
         points.delete(*points.get_children())
         for kind, index, name, value, units, held, clazz in snap["points"]:
-            shown_value = _shown(kind, index, value, units, held)
+            shown_value = _shown(kind, index, name, value, units, held)
             points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), _object(kind), index, clazz, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
@@ -520,11 +520,16 @@ def _paint_security(state: dict, snap: dict) -> None:
     state["stats"]["last_time"].set(time.strftime("%H:%M:%S", time.localtime(when / 1000)) if when else "—")
 
 
-def _shown(kind: str, index: int, value: float, units: str, held: bool) -> str:
+def _shown(kind: str, index: int, name: str, value: float, units: str, held: bool) -> str:
     if kind == "bo":
         text = "Latched" if value >= 0.5 else "Dropped"
     elif kind == "bi":
-        if index <= 3:
+        label = name.upper()
+        if "FLT" in label or "-AL" in label:
+            text = "Alarm" if value >= 0.5 else "Normal"
+        elif any(token in label for token in ("STS", "RDY", "RUN", "CAB", "REM-DI")):
+            text = "On" if value >= 0.5 else "Off"
+        elif index <= 3:
             text = "Closed" if value >= 0.5 else "Open"
         elif index == 10:
             text = "Remote" if value >= 0.5 else "Local"
