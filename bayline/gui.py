@@ -64,8 +64,8 @@ def run_gui(host) -> None:
     wire_tab = _tab(book, "Wire")
     security_tab = _tab(book, "Security")
 
-    points = ttk.Treeview(points_tab, columns=("kind", "addr", "idx", "clazz", "name", "value"), show="headings")
-    for key, title, width in (("kind", "Type", 60), ("addr", "DNP3 object", 120), ("idx", "Index", 60), ("clazz", "Class", 60), ("name", "Point", 260), ("value", "Value", 160)):
+    points = ttk.Treeview(points_tab, columns=("kind", "object", "idx", "clazz", "name", "value"), show="headings")
+    for key, title, width in (("kind", "Type", 60), ("object", "Object", 90), ("idx", "Index", 60), ("clazz", "Class", 60), ("name", "Point", 280), ("value", "Value", 160)):
         points.heading(key, text=title)
         points.column(key, width=width, anchor="w")
     points.pack(fill="both", expand=True, padx=8, pady=8)
@@ -170,8 +170,7 @@ def run_gui(host) -> None:
         points.delete(*points.get_children())
         for kind, index, name, value, units, held, clazz in snap["points"]:
             shown_value = _shown(kind, index, value, units, held)
-            address = f"{_object(kind)}:{index}"
-            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), address, index, clazz, name, shown_value))
+            points.insert("", "end", iid=f"{kind}-{index}", values=(kind.upper(), _object(kind), index, clazz, name, shown_value))
         if selected:
             points.selection_set([item for item in selected if points.exists(item)])
         key = tuple((item[0], item[2], item[3]) for item in snap["log"])
