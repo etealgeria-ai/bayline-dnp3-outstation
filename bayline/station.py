@@ -366,7 +366,7 @@ def create_rtu_station() -> Station:
     rows.extend(_point("bo", index, name, 0, "", 0, 0, 2, 2) for index, name in ((0, "DO_EV"), (1, "DO_SR"), (2, "DO_WB"), (16, "AI_RESET"), (17, "AI_RESET")))
     rows.extend(_point("ai", index, name, value, units, 2, deadband, 5, 5) for index, name, value, units, deadband in analogs)
     rows.extend(_point("ao", index, name, 0, "", 0, 0.01, 3, 5) for index, name in ((0, "AO_CHECK"), (1, "AO_CHECK2")))
-    station = Station(name="RTU", location="RTU", model="rtu", outstation=5, points=rows)
+    station = Station(name="LD2 RTU", location="LD2 RTU", model="rtu", outstation=5, points=rows)
     station.security[17] = 1
     station.security_sent[17] = 1
     return station
