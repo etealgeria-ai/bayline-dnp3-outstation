@@ -408,7 +408,7 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
             wrap.set("AES-128")
         else:
             mac.set("HMAC-SHA-256-16")
-            wrap.set("AES-256")
+            wrap.set("AES-128" if len("".join(ch for ch in key.get() if ch in "0123456789abcdefABCDEF")) == 32 else "AES-256")
 
     version.trace_add("write", on_version)
     row(auth, "User number", ttk.Entry(auth, textvariable=user, width=30))
@@ -440,9 +440,15 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
         if not gate["ready"]:
             return
         pair = {"HMAC-SHA-1-8": 2, "AES-128": 2, "HMAC-SHA-256-16": 5, "AES-256": 5}
+        if selected_mac == "HMAC-SHA-256-16" and selected_wrap == "AES-128":
+            if version.get() != "SAv5":
+                notice.set("HMAC-SHA-256-16 with AES-128 belongs to SAv5. Change SA version to SAv5.")
+                return
+            notice.set("SAv5 is active with HMAC-SHA-256-16 and AES-128. Use the 16-octet update key.")
+            return
         wanted = pair.get(selected_mac)
         if wanted is None or pair.get(selected_wrap) != wanted:
-            notice.set("MAC and key wrap do not form an implemented pair. SAv2 is HMAC-SHA-1-8 + AES-128. SAv5 is HMAC-SHA-256-16 + AES-256.")
+            notice.set("MAC and key wrap do not form an implemented pair. SAv2 is HMAC-SHA-1-8 + AES-128. SAv5 is HMAC-SHA-256-16 with AES-128 or AES-256.")
             return
         if (wanted == 5) != (version.get() == "SAv5"):
             notice.set(f"That pair belongs to SAv{wanted}. Change SA version to SAv{wanted}. The version is not inferred from the algorithm.")

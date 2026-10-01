@@ -22,7 +22,7 @@ DEFAULT_KEY_FILE = "bayline-update-key.hex"
 def load_update_key(text: str = "", path: str = "") -> tuple[bytes, str]:
     target = path or os.environ.get("BAYLINE_UPDATE_KEY_FILE") or DEFAULT_KEY_FILE
     chosen = text or os.environ.get("BAYLINE_UPDATE_KEY", "")
-    parsed = hex_to_bytes(chosen, 32) if chosen else None
+    parsed = _parse_update_key(chosen) if chosen else None
     if parsed:
         try:
             with open(target, "w", encoding="ascii") as handle:
@@ -31,7 +31,7 @@ def load_update_key(text: str = "", path: str = "") -> tuple[bytes, str]:
             pass
         return parsed, target
     try:
-        stored = hex_to_bytes(open(target, encoding="ascii").read(), 32)
+        stored = _parse_update_key(open(target, encoding="ascii").read())
     except OSError:
         stored = None
     if stored:
@@ -43,6 +43,13 @@ def load_update_key(text: str = "", path: str = "") -> tuple[bytes, str]:
     except OSError:
         target = ""
     return key, target
+
+
+def _parse_update_key(text: str) -> bytes | None:
+    key = hex_to_bytes(text)
+    if key is not None and len(key) in (16, 32):
+        return key
+    return None
 
 
 def _save_key(path: str, key: bytes) -> None:
@@ -282,9 +289,9 @@ class Host:
             sav.session_lifetime_s = max(30, min(86400, lifetime_s))
 
     def set_update_key(self, text: str) -> str | None:
-        key = hex_to_bytes(text, 32)
+        key = _parse_update_key(text)
         if key is None:
-            return "Update key must be 32 octets of hex."
+            return "Update key must be 16 or 32 octets of hex."
         with self.lock:
             self.station.sav5.update_key = key
             reset_session_keys(self.station.sav5)
@@ -420,7 +427,8 @@ def open_hosts(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] 
     yard = Host(port, host, allow_ips, update_key, key_file or DEFAULT_KEY_FILE, create_station())
     rtu = create_rtu_station()
     rtu.outstation = rtu_address
-    second = Host(rtu_port or port + 1, host, allow_ips, update_key, "bayline-rtu-update-key.hex", rtu)
+    rtu_key = update_key or "00112233445566778899aabbccddeeff"
+    second = Host(rtu_port or port + 1, host, allow_ips, rtu_key, "bayline-rtu-update-key.hex", rtu)
     return [yard, second]
 
 

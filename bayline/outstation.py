@@ -1087,7 +1087,7 @@ def _on_key_status(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     os.key_status_count += 1
     os.ksq = (os.ksq + 1) & 0xFFFFFFFF
     profile = auth_profile(station.sav5)
-    if os.status == KEY_OK and os.last_key_change and len(os.monitor_key) == profile.key_len:
+    if os.status == KEY_OK and os.last_key_change and len(os.monitor_key) in (16, 32):
         os.last_status_mac = _mac(station, os.monitor_key, os.last_key_change)
     else:
         os.last_status_mac = b""
@@ -1107,12 +1107,13 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     plain = aes_unwrap(update_key_material(station.sav5), wrapped)
     unwrapped = None
     status_ok = False
-    if plain and len(plain) >= 2 + profile.key_len * 2:
+    if plain and len(plain) >= 34:
         key_len = plain[0] | (plain[1] << 8)
         control = plain[2 : 2 + key_len]
         monitor = plain[2 + key_len : 2 + key_len * 2]
         echoed = plain[2 + key_len * 2 :]
-        status_ok = key_len == profile.key_len and _status_echo_ok(echoed, os.last_key_status, os.last_status_mac)
+        allowed = (16,) if profile.version == 2 else (16, 32)
+        status_ok = key_len in allowed and len(control) == key_len and len(monitor) == key_len and _status_echo_ok(echoed, os.last_key_status, os.last_status_mac)
         if status_ok:
             unwrapped = (control, monitor)
     seq_ok = len(os.last_key_status) >= 4 and ksq == _u32(os.last_key_status, 0)
@@ -1152,6 +1153,11 @@ def _on_key_change(station: Station, seq: int, body: bytes, apdu_in: bytes, now:
     return [_auth_response(station, seq, _key_status(station, user))]
 
 
+def _session_keys_ready(station: Station) -> bool:
+    os = station.sav5.os
+    return os.status == KEY_OK and len(os.control_key) in (16, 32) and len(os.monitor_key) == len(os.control_key)
+
+
 def _mac(station: Station, key: bytes, message: bytes) -> bytes:
     profile = auth_profile(station.sav5)
     return session_mac(key, message, profile.mac_len, profile.version == 2)
@@ -1168,7 +1174,7 @@ def _on_reply(station: Station, seq: int, body: bytes, now: int) -> list[bytes]:
     if csq != pending.csq or user != pending.user:
         station.sav5.pending = None
         return _auth_fail(station, seq, user, ERR_UNEXPECTED, f"Reply CSQ {csq} user {user} does not match challenge CSQ {pending.csq}.", now, csq)
-    if len(station.sav5.os.control_key) != profile.key_len:
+    if not _session_keys_ready(station):
         station.sav5.pending = None
         return _auth_fail(station, seq, user, ERR_AUTH_FAILED, "No control-direction session key for this user.", now, csq)
     expect = _mac(station, station.sav5.os.control_key, pending.challenge_apdu + pending.critical_apdu)
@@ -1209,7 +1215,9 @@ def _on_update_request(station: Station, seq: int, body: bytes, now: int) -> lis
     if method != UK_METHOD:
         return _auth_fail(station, seq, station.sav5.user, ERR_UK_METHOD, f"Update-key method {method} is not permitted. This outstation accepts method 4.", now)
     name = body[5 : 5 + name_len].decode("ascii", "replace")
-    if name != station.sav5.role:
+    names = {station.sav5.role, station.sav5.user_name, station.sav5.outstation_name, station.name}
+    names.discard("")
+    if name not in names:
         return _auth_fail(station, seq, 0, ERR_UNKNOWN_USER, f'No user named "{name}". The association role is {station.sav5.role}.', now)
     challenge = random_bytes(UK_CHALLENGE_LEN)
     station.sav5.update_pending = PendingUpdateKey(station.sav5.os.ksq, station.sav5.user, challenge)
@@ -1233,7 +1241,8 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
     if ksq != pending.ksq or user != pending.user:
         station.sav5.update_pending = None
         return _auth_fail(station, seq, user, ERR_UNEXPECTED, "Update-key change sequence or user did not match the reply.", now, ksq)
-    plain = aes256_unwrap(station.sav5.update_key, encrypted)
+    kek = station.sav5.authority_key if len(station.sav5.authority_key) in (16, 32) else station.sav5.update_key
+    plain = aes_unwrap(kek, encrypted)
     if not plain or len(plain) != UPDATE_KEY_LEN + UK_CHALLENGE_LEN or not same_bytes(plain[UPDATE_KEY_LEN:], pending.outstation_challenge):
         station.sav5.update_pending = None
         _stat(station, 16, now)
@@ -1303,7 +1312,7 @@ def _gate_critical(station: Station, apdu: ParsedApdu, user: bytes, now: int) ->
             return _auth_fail(station, apdu.seq, user_no, ERR_UNEXPECTED, "Aggressive mode requires g120v3 as the first object.", now)
         return _check_aggressive(station, apdu, user, aggressive, mac, now)
     os = station.sav5.os
-    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len:
+    if not _session_keys_ready(station):
         return _auth_fail(station, apdu.seq, user_no, ERR_AUTH_FAILED, "Session keys are not valid. Send a key status request and a key change before this control.", now)
     profile = auth_profile(station.sav5)
     csq = os.csq & 0xFFFFFFFF
@@ -1335,7 +1344,7 @@ def _check_aggressive(station: Station, apdu: ParsedApdu, user: bytes, aggressiv
     os = station.sav5.os
     if who != station.sav5.user:
         return _auth_fail(station, apdu.seq, who, ERR_UNKNOWN_USER, f"Aggressive mode user {who} is not the association user.", now, csq)
-    if os.status != KEY_OK or len(os.control_key) != auth_profile(station.sav5).key_len or not os.challenge_apdu:
+    if not _session_keys_ready(station) or not os.challenge_apdu:
         return _auth_fail(station, apdu.seq, who, ERR_AUTH_FAILED, "Aggressive mode needs a prior challenge and valid session keys.", now, csq)
     if csq != (os.csq & 0xFFFFFFFF):
         return _auth_fail(station, apdu.seq, who, ERR_UNEXPECTED, f"Aggressive CSQ {csq} was not one greater than the last challenge.", now, csq)

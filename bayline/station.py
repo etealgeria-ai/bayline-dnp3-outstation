@@ -154,6 +154,9 @@ class Sav5:
     role: str = "Operator"
     user: int = PROVISIONED_USER
     update_key: bytes = field(default_factory=lambda: os.urandom(UPDATE_KEY_LEN))
+    authority_key: bytes = b""
+    user_name: str = "Common"
+    outstation_name: str = ""
     os: OsSession = field(default_factory=OsSession)
     pending: PendingAuth | None = None
     update_pending: PendingUpdateKey | None = None
@@ -193,11 +196,16 @@ class AuthProfile:
 def auth_profile(sav: Sav5) -> AuthProfile:
     if sav.version == 2:
         return AuthProfile(2, 5, 8, 1, 16, 8, "SAv2", "HMAC-SHA-1-8", "AES-128")
-    return AuthProfile(5, 4, 16, 2, 32, 16, "SAv5", "HMAC-SHA-256-16", "AES-256")
+    material = update_key_material(sav)
+    aes128 = len(material) == 16
+    return AuthProfile(5, 4, 16, 1 if aes128 else 2, 32, 16, "SAv5", "HMAC-SHA-256-16", "AES-128" if aes128 else "AES-256")
 
 
 def update_key_material(sav: Sav5) -> bytes:
-    return sav.update_key[: auth_profile(sav).key_len]
+    key = sav.update_key
+    if sav.version == 2 or len(key) == 16:
+        return key[:16]
+    return key[:32]
 
 
 @dataclass
@@ -367,6 +375,14 @@ def create_rtu_station() -> Station:
     rows.extend(_point("ai", index, name, value, units, 2, deadband, 5, 5) for index, name, value, units, deadband in analogs)
     rows.extend(_point("ao", index, name, 0, "", 0, 0.01, 3, 5) for index, name in ((0, "AO___CHECK"), (1, "AO___CHECK2")))
     station = Station(name="LD2 RTU", location="LD2 RTU", model="rtu", outstation=5, points=rows)
+    station.sav5.user_name = "Common"
+    station.sav5.outstation_name = "Outstation01"
+    station.sav5.user = 1
+    station.sav5.role = "Operator"
+    station.sav5.version = 5
+    station.sav5.update_key = bytes.fromhex("00112233445566778899aabbccddeeff")
+    station.sav5.authority_key = bytes.fromhex("0102030405060708090001020304050601020304050607080900010203040506")
+    station.sav5.last_result = "SAv5 with AES-128. Session keys use USR_KEY_01. SYM_KEY_01 is the authority key and is not used for this wrap."
     station.security[17] = 1
     station.security_sent[17] = 1
     return station
