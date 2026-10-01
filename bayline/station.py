@@ -382,7 +382,8 @@ def create_rtu_station() -> Station:
     station.sav5.version = 5
     station.sav5.update_key = bytes.fromhex("00112233445566778899aabbccddeeff")
     station.sav5.authority_key = bytes.fromhex("0102030405060708090001020304050601020304050607080900010203040506")
-    station.sav5.last_result = "SAv5 with AES-128. Session keys use USR_KEY_01. SYM_KEY_01 is the authority key and is not used for this wrap."
+    station.sav5.allow_remote_update = True
+    station.sav5.last_result = "SAv5 with AES-128. Session keys use the 16-octet update key. The authority key wraps a replacement update key only."
     station.security[17] = 1
     station.security_sent[17] = 1
     return station

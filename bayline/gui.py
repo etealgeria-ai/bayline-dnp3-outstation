@@ -371,6 +371,7 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
     mac = tk.StringVar(value="HMAC-SHA-256-16")
     wrap = tk.StringVar(value="AES-256")
     key = tk.StringVar()
+    authority = tk.StringVar()
     show_key = tk.BooleanVar(value=False)
     challenge_ms = tk.StringVar(value="5000")
     lifetime = tk.StringVar(value="3600")
@@ -432,7 +433,10 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
     row(crypto, "Key wrap", wrap_box)
     tk.Label(crypto, text="SA version selects the procedure. The MAC and key wrap must match that version.", bg=BG, fg=MUTED, anchor="w", font=("Segoe UI", 9)).pack(fill="x", pady=(4, 2))
     key_entry = ttk.Entry(crypto, textvariable=key, show="*")
+    authority_entry = ttk.Entry(crypto, textvariable=authority, show="*")
     row(crypto, "Update key", key_entry)
+    row(crypto, "Authority key", authority_entry)
+    tk.Label(crypto, text="The update key wraps session keys. The authority key wraps a new update key only.", bg=BG, fg=MUTED, anchor="w", font=("Segoe UI", 9)).pack(fill="x", pady=(4, 2))
     buttons = tk.Frame(crypto, bg=BG)
     buttons.pack(fill="x", pady=4)
 
@@ -461,15 +465,21 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
     def import_key() -> None:
         notice.set(host().set_update_key(key.get()) or "Update key imported.")
 
+    def import_authority() -> None:
+        notice.set(host().set_authority_key(authority.get()) or "Authority key imported.")
+
     def generate_key() -> None:
         key.set(host().generate_update_key())
-        notice.set("New update key generated. Copy it into the master.")
+        notice.set("New update key generated. Copy it into the master. The authority key is unchanged.")
 
     def toggle_key() -> None:
-        key_entry.configure(show="" if show_key.get() else "*")
+        shown = "" if show_key.get() else "*"
+        key_entry.configure(show=shown)
+        authority_entry.configure(show=shown)
 
     tk.Button(buttons, text="Generate key", command=generate_key, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
     tk.Button(buttons, text="Import key", command=import_key, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
+    tk.Button(buttons, text="Import authority", command=import_authority, bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
     tk.Checkbutton(buttons, text="Show key", variable=show_key, command=toggle_key, bg=BG, fg=INK, selectcolor=SURFACE, activebackground=BG, activeforeground=INK).pack(side="left")
 
     session = section("3  Session")
@@ -537,7 +547,7 @@ def _build_security(parent: tk.Frame, host_of) -> dict:
     actions.pack(fill="x", padx=16, pady=(0, 16))
     tk.Button(actions, text="Remote / local", command=lambda: host().set_flag("local", not host().snapshot()["local"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left", padx=(0, 6))
     tk.Button(actions, text="Yard run / hold", command=lambda: host().set_flag("sim", not host().snapshot()["sim_on"]), bg=SURFACE, fg=INK, relief="flat", padx=8, pady=4).pack(side="left")
-    return {"enabled": enabled, "aggressive": aggressive, "version": version, "role": role, "user": user, "mac": mac, "wrap": wrap, "key": key, "lifetime": lifetime, "challenge_ms": challenge_ms, "notice": notice, "stats": stats, "policy": policy_vars, "gate": gate}
+    return {"enabled": enabled, "aggressive": aggressive, "version": version, "role": role, "user": user, "mac": mac, "wrap": wrap, "key": key, "authority": authority, "lifetime": lifetime, "challenge_ms": challenge_ms, "notice": notice, "stats": stats, "policy": policy_vars, "gate": gate}
 
 
 def _paint_security(state: dict, snap: dict) -> None:
@@ -551,6 +561,7 @@ def _paint_security(state: dict, snap: dict) -> None:
         state["mac"].set(sav["mac_name"])
         state["wrap"].set(sav["wrap_name"])
         state["key"].set(sav["key"])
+        state["authority"].set(sav.get("authority", ""))
         state["lifetime"].set(str(sav["session_lifetime_s"]))
         state["challenge_ms"].set(str(sav["challenge_timeout_ms"]))
         for name, variable in state["policy"].items():

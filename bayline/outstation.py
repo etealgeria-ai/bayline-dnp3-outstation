@@ -70,7 +70,6 @@ from bayline.station import (
     PROVISIONED_USER,
     RESTART_FLAG,
     UK_METHOD,
-    UPDATE_KEY_LEN,
     DnpEvent,
     PendingAuth,
     PendingConfirm,
@@ -1243,11 +1242,12 @@ def _on_update_change(station: Station, seq: int, body: bytes, mac_raw: bytes | 
         return _auth_fail(station, seq, user, ERR_UNEXPECTED, "Update-key change sequence or user did not match the reply.", now, ksq)
     kek = station.sav5.authority_key if len(station.sav5.authority_key) in (16, 32) else station.sav5.update_key
     plain = aes_unwrap(kek, encrypted)
-    if not plain or len(plain) != UPDATE_KEY_LEN + UK_CHALLENGE_LEN or not same_bytes(plain[UPDATE_KEY_LEN:], pending.outstation_challenge):
+    challenge = pending.outstation_challenge
+    new_key = plain[: -len(challenge)] if plain and challenge and len(plain) > len(challenge) and same_bytes(plain[-len(challenge) :], challenge) else b""
+    if len(new_key) not in (16, 32):
         station.sav5.update_pending = None
         _stat(station, 16, now)
-        return _auth_fail(station, seq, user, ERR_SIGNATURE, "Update key unwrap failed, or the outstation challenge did not match.", now, ksq)
-    new_key = plain[:UPDATE_KEY_LEN]
+        return _auth_fail(station, seq, user, ERR_SIGNATURE, "Authority key unwrap failed, or the outstation challenge did not match.", now, ksq)
     mac_object_len = 6 + len(mac_raw)
     signed = apdu_in[: max(0, len(apdu_in) - mac_object_len)]
     expect = hmac_sha256(new_key, signed, 32)

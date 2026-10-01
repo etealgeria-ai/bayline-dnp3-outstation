@@ -52,6 +52,13 @@ def _parse_update_key(text: str) -> bytes | None:
     return None
 
 
+def _authority_file(path: str) -> str:
+    if not path:
+        return ""
+    root, ext = os.path.splitext(path)
+    return root + "-authority" + (ext or ".hex")
+
+
 def _save_key(path: str, key: bytes) -> None:
     if not path:
         return
@@ -97,6 +104,19 @@ class Host:
         key, path = load_update_key(update_key, key_file)
         self.station.sav5.update_key = key
         self.key_file = path
+        self.authority_file = _authority_file(path)
+        stored_authority = None
+        if self.authority_file:
+            try:
+                stored_authority = _parse_update_key(open(self.authority_file, encoding="ascii").read())
+            except OSError:
+                stored_authority = None
+        if stored_authority:
+            self.station.sav5.authority_key = stored_authority
+        elif self.station.sav5.authority_key:
+            _save_key(self.authority_file, self.station.sav5.authority_key)
+        if self.station.sav5.authority_key:
+            self.station.sav5.allow_remote_update = True
         self.lock = threading.Lock()
         self.clients: list[socket.socket] = []
         self.running = False
@@ -231,6 +251,8 @@ class Host:
                     },
                     "result": sav.last_result,
                     "key": update_key_material(sav).hex(),
+                    "authority": sav.authority_key.hex(),
+                    "outstation_name": sav.outstation_name,
                 },
                 "points": [(p.kind, p.index, p.name, p.value, p.units, p.manual, p.clazz) for p in station.points],
                 "log": [(item.id, item.time, item.direction, item.summary, item.hex, item.ok) for item in station.log[-80:]],
@@ -297,6 +319,17 @@ class Host:
             reset_session_keys(self.station.sav5)
             self.station.sav5.last_result = "Update key imported. Session keys were cleared."
         _save_key(self.key_file, key)
+        return None
+
+    def set_authority_key(self, text: str) -> str | None:
+        key = _parse_update_key(text)
+        if key is None:
+            return "Authority key must be 16 or 32 octets of hex."
+        with self.lock:
+            self.station.sav5.authority_key = key
+            self.station.sav5.allow_remote_update = True
+            self.station.sav5.last_result = "Authority key imported. It wraps a new update key. Session keys still use the update key."
+        _save_key(self.authority_file, key)
         return None
 
     def generate_update_key(self) -> str:
