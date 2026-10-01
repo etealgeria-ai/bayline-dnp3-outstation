@@ -460,8 +460,8 @@ def open_hosts(port: int = DEFAULT_PORT, host: str = HOST, allow_ips: list[str] 
     yard = Host(port, host, allow_ips, update_key, key_file or DEFAULT_KEY_FILE, create_station())
     rtu = create_rtu_station()
     rtu.outstation = rtu_address
-    rtu_key = update_key or "00112233445566778899aabbccddeeff"
-    second = Host(rtu_port or port + 1, host, allow_ips, rtu_key, "bayline-rtu-update-key.hex", rtu)
+    second = Host(rtu_port or port + 1, host, allow_ips, "00112233445566778899aabbccddeeff", "bayline-rtu-update-key.hex", rtu)
+    second.set_authority_key("0102030405060708090001020304050601020304050607080900010203040506")
     return [yard, second]
 
 
